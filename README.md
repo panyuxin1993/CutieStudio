@@ -113,6 +113,15 @@ If you are running this on a remote server, X11 forwarding is possible. Start by
 
 (For single video evaluation, see the unofficial script `scripts/process_video.py` from https://github.com/hkchengrex/Cutie/pull/16)
 
+## Recent Updates
+
+### 2025-01
+- Added mask area calculation functionality to the interactive GUI
+  - New button and text field for exporting mask areas to CSV
+  - Supports custom object naming through `--name_objects` parameter
+  - Uses standard DAVIS color palette for consistent object identification
+  - Exports frame-by-frame area measurements for each object
+
 ## Training and Evaluation
 
 1. [Running Cutie on video object segmentation data.](docs/EVALUATION.md)
@@ -130,6 +139,8 @@ If you are running this on a remote server, X11 forwarding is possible. Start by
 ```
 
 ## References
+
+- The mask area calculation functionality was contributed by [Yuxin Pan](https://github.com/panyuxin1993).
 
 - The GUI tools uses [RITM](https://github.com/SamsungLabs/ritm_interactive_segmentation) for interactive image segmentation. This repository also contains a redistribution of their code in `gui/ritm`. That part of code follows RITM's license.
 
