@@ -28,6 +28,7 @@ from gui.click_controller import ClickController
 from gui.reader import PropagationReader, get_data_loader
 from gui.exporter import convert_frames_to_video, convert_mask_to_binary
 from scripts.download_models import download_models_if_needed
+from mask_area import calculate_mask_areas
 
 log = logging.getLogger()
 
@@ -691,3 +692,30 @@ class MainController():
     @property
     def T(self) -> int:
         return self.res_man.T
+
+    def on_export_mask_areas(self):
+        output_filename = self.gui.mask_area_filename.text()
+        if not output_filename:
+            self.gui.text('Please enter an output filename')
+            return
+        if not output_filename.endswith('.csv'):
+            output_filename += '.csv'
+        mask_folder = path.join(self.cfg['workspace'], 'masks')
+        if path.exists(mask_folder):
+            self.gui.text(f'Exporting mask areas -- please wait')
+            self.gui.process_events()
+            try:
+                # Calculate areas
+                df = calculate_mask_areas(mask_folder)
+                # Rename columns to use custom object names
+                new_columns = {'frame': 'frame'}
+                for i, name in enumerate(self.name_objects, 1):
+                    new_columns[f'object_{i}'] = name
+                df = df.rename(columns=new_columns)
+                # Save to CSV
+                df.to_csv(output_filename, index=False)
+                self.gui.text(f'Mask areas exported to {output_filename}')
+            except Exception as e:
+                self.gui.text(f'Error exporting mask areas: {str(e)}')
+        else:
+            self.gui.text(f'No masks found in {mask_folder}')

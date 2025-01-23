@@ -6,7 +6,7 @@ from omegaconf import DictConfig
 
 from PySide6.QtWidgets import (QWidget, QComboBox, QCheckBox, QHBoxLayout, QLabel, QPushButton,
                                QTextEdit, QSpinBox, QPlainTextEdit, QVBoxLayout, QSizePolicy,
-                               QButtonGroup, QSlider, QRadioButton, QApplication, QFileDialog)
+                               QButtonGroup, QSlider, QRadioButton, QApplication, QFileDialog, QLineEdit)
 
 from PySide6.QtGui import (QKeySequence, QShortcut, QTextCursor, QImage, QPixmap, QIcon)
 from PySide6.QtCore import Qt, QTimer
@@ -35,6 +35,14 @@ class GUI(QWidget):
         self.setWindowTitle(f'Cutie demo: {cfg["workspace"]}')
         self.setGeometry(100, 100, self.w + 200, self.h + 200)
         self.setWindowIcon(QIcon('docs/icon.png'))
+
+        # Add mask area export controls
+        self.mask_area_filename = QLineEdit()
+        self.mask_area_filename.setPlaceholderText("Enter output CSV filename")
+        self.mask_area_filename.setText(str(Path(cfg["workspace"]) / "mask_areas.csv"))
+        self.mask_area_filename.setMinimumWidth(200)
+        self.export_mask_areas_button = QPushButton('Export mask areas')
+        self.export_mask_areas_button.clicked.connect(controller.on_export_mask_areas)
 
         # set up some buttons
         self.play_button = QPushButton('Play video')
@@ -272,11 +280,18 @@ class GUI(QWidget):
         overlay_botbox.addWidget(self.fps_dial)
         overlay_botbox.addWidget(QLabel('Output bitrate (Mbps): '))
         overlay_botbox.addWidget(self.bitrate_dial)
+        overlay_maskarea_box = QHBoxLayout()
+        overlay_maskarea_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        overlay_maskarea_box.addWidget(QLabel('Mask areas CSV:'))
+        overlay_maskarea_box.addWidget(self.mask_area_filename)
+        overlay_maskarea_box.addWidget(self.export_mask_areas_button)
         overlay_subbox.addLayout(overlay_botbox)
+        overlay_subbox.addLayout(overlay_maskarea_box)
         overlay_subbox.addLayout(overlay_topbox)
         navi.addLayout(overlay_subbox)
         apply_to_all_children_widget(overlay_topbox, apply_fixed_size_policy)
         apply_to_all_children_widget(overlay_botbox, apply_fixed_size_policy)
+        apply_to_all_children_widget(overlay_maskarea_box, apply_fixed_size_policy)
 
         navi.addStretch(1)
         control_subbox = QVBoxLayout()
@@ -377,6 +392,8 @@ class GUI(QWidget):
 
         # quit shortcut
         QShortcut(QKeySequence(Qt.Key.Key_Q), self).activated.connect(self.close)
+
+
 
 
     def resizeEvent(self, event):

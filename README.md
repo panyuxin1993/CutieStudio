@@ -100,10 +100,10 @@ main()
 
 ### Interactive Demo
 
-Start the interactive demo with:
+Start the interactive gui with:
 
 ```bash
-python interactive_demo.py --video ./examples/example.mp4 --num_objects 1
+python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_objects head left_hand
 ```
 
 [See more instructions here](docs/INTERACTIVE.md).

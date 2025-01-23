@@ -4,31 +4,15 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
+from cutie.utils.palette import davis_palette_np
 
 def get_davis_color_mapping():
     """
     Returns the standard DAVIS dataset color mapping.
-    Colors are in RGB format.
+    Colors are in RGB format, matching the palette used in cutie/utils/palette.py.
     """
-    # Standard DAVIS color palette (RGB format)
-    davis_colors = [
-        (0, 0, 0),       # Background (black)
-        (128, 0, 0),     # Object 1 (red)
-        (0, 128, 0),     # Object 2 (green)
-        (128, 128, 0),   # Object 3 (yellow)
-        (0, 0, 128),     # Object 4 (blue)
-        (128, 0, 128),   # Object 5 (magenta)
-        (0, 128, 128),   # Object 6 (cyan)
-        (128, 128, 128), # Object 7 (gray)
-        (64, 0, 0),      # Object 8 (dark red)
-        (192, 0, 0),     # Object 9 (bright red)
-        (64, 128, 0),    # Object 10 (olive)
-        (192, 128, 0),   # Object 11 (orange)
-        (64, 0, 128),    # Object 12 (purple)
-        (192, 0, 128),   # Object 13 (pink)
-        (64, 128, 128),  # Object 14 (teal)
-        (192, 128, 128)  # Object 15 (rosy)
-    ]
+    # Convert numpy array to list of tuples for easier comparison
+    davis_colors = [tuple(color) for color in davis_palette_np]
     return davis_colors
 
 def calculate_mask_areas(mask_dir):
@@ -75,7 +59,7 @@ def calculate_mask_areas(mask_dir):
     for davis_color in davis_colors[1:]:  # Skip background
         if any(np.all(color == davis_color) for color in unique_colors):
             color_to_id[davis_color] = next_id
-            print(f"Object {next_id}: RGB{davis_color} ({get_color_name(davis_color)})")
+            print(f"Object {next_id}: RGB{davis_color}")
             next_id += 1
     
     # Handle any colors not in standard DAVIS palette (should be rare)
@@ -125,26 +109,6 @@ def calculate_mask_areas(mask_dir):
     
     return df
 
-def get_color_name(rgb):
-    """Returns a human-readable name for standard DAVIS colors"""
-    color_names = {
-        (128, 0, 0): "Red",
-        (0, 128, 0): "Green",
-        (128, 128, 0): "Yellow",
-        (0, 0, 128): "Blue",
-        (128, 0, 128): "Magenta",
-        (0, 128, 128): "Cyan",
-        (128, 128, 128): "Gray",
-        (64, 0, 0): "Dark Red",
-        (192, 0, 0): "Bright Red",
-        (64, 128, 0): "Olive",
-        (192, 128, 0): "Orange",
-        (64, 0, 128): "Purple",
-        (192, 0, 128): "Pink",
-        (64, 128, 128): "Teal",
-        (192, 128, 128): "Rosy"
-    }
-    return color_names.get(rgb, "Unknown")
 
 def main():
     """Main function to run the mask area calculation"""
