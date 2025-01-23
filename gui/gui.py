@@ -29,6 +29,7 @@ class GUI(QWidget):
         self.h = controller.h
         self.w = controller.w
         self.T = controller.T
+        self.name_objects = controller.name_objects
 
         # set up the window
         self.setWindowTitle(f'Cutie demo: {cfg["workspace"]}')
@@ -48,6 +49,10 @@ class GUI(QWidget):
         self.forward_run_button = QPushButton('Propagate forward')
         self.forward_run_button.clicked.connect(controller.on_forward_propagation)
         self.forward_run_button.setMinimumWidth(150)
+
+        self.forward_step_button = QPushButton('Step forward')
+        self.forward_step_button.clicked.connect(controller.step_forward_propagation)
+        self.forward_step_button.setMinimumWidth(100)
 
         self.backward_run_button = QPushButton('Propagate backward')
         self.backward_run_button.clicked.connect(controller.on_backward_propagation)
@@ -75,7 +80,7 @@ class GUI(QWidget):
         # current object id
         self.object_dial = QSpinBox()
         self.object_dial.setReadOnly(False)
-        self.object_dial.setMinimumSize(50, 30)
+        self.object_dial.setMinimumSize(100, 30)
         self.object_dial.setMinimum(1)
         self.object_dial.setMaximum(controller.num_objects)
         self.object_dial.editingFinished.connect(controller.on_object_dial_change)
@@ -87,6 +92,7 @@ class GUI(QWidget):
         self.frame_name = QLabel()
         self.frame_name.setMinimumSize(100, 30)
         self.frame_name.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
 
         # timeline slider
         self.tl_slider = QSlider(Qt.Orientation.Horizontal)
@@ -113,7 +119,7 @@ class GUI(QWidget):
         self.save_visualization_combo.addItem("None")
         self.save_visualization_combo.addItem("Always")
         self.save_visualization_combo.addItem("Propagation only (higher quality)")
-        self.combo.setCurrentText('None')
+        self.save_visualization_combo.setCurrentText('Always')
         self.save_visualization_combo.currentTextChanged.connect(
             controller.on_set_save_visualization_mode)
 
@@ -124,7 +130,7 @@ class GUI(QWidget):
         # controls for output FPS and bitrate
         self.fps_dial = QSpinBox()
         self.fps_dial.setReadOnly(False)
-        self.fps_dial.setMinimumSize(40, 30)
+        self.fps_dial.setMinimumSize(100, 30)
         self.fps_dial.setMinimum(1)
         self.fps_dial.setMaximum(60)
         self.fps_dial.setValue(cfg['output_fps'])
@@ -204,6 +210,7 @@ class GUI(QWidget):
         interact_subbox = QVBoxLayout()
         interact_topbox = QHBoxLayout()
         interact_botbox = QHBoxLayout()
+        item_layout = QHBoxLayout()
         interact_topbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
         interact_topbox.addWidget(self.lcd)
         interact_topbox.addWidget(self.play_button)
@@ -213,8 +220,31 @@ class GUI(QWidget):
         interact_botbox.addWidget(self.object_dial)
         interact_botbox.addWidget(self.object_color)
         interact_botbox.addWidget(self.frame_name)
+        # list of all objects
+        item_layout.addWidget(QLabel('All objects:'))
+        for item in range(controller.num_objects):
+            object_id = item + 1
+            r, g, b = davis_palette_np[object_id]
+            rgb = f'rgb({r},{g},{b})'
+
+            # Create color box
+            color_label = QLabel()
+            color_label.setStyleSheet('QLabel {background: ' + rgb + ';}')
+            color_label.setText(f'{self.name_objects[object_id-1]}')
+            color_label.setMinimumSize(30, 30)
+            color_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Create ID and name labels
+            id_label = QLabel(str(item+1))
+            #name_label = QLabel(self.name_objects[item])
+            
+            # Add widgets to the layout
+            item_layout.addWidget(id_label)
+            item_layout.addWidget(color_label)
+            #item_layout.addWidget(name_label)
+            
         interact_subbox.addLayout(interact_topbox)
         interact_subbox.addLayout(interact_botbox)
+        interact_subbox.addLayout(item_layout)
         interact_botbox.setAlignment(Qt.AlignmentFlag.AlignLeft)
         navi.addLayout(interact_subbox)
 
@@ -242,8 +272,8 @@ class GUI(QWidget):
         overlay_botbox.addWidget(self.fps_dial)
         overlay_botbox.addWidget(QLabel('Output bitrate (Mbps): '))
         overlay_botbox.addWidget(self.bitrate_dial)
-        overlay_subbox.addLayout(overlay_topbox)
         overlay_subbox.addLayout(overlay_botbox)
+        overlay_subbox.addLayout(overlay_topbox)
         navi.addLayout(overlay_subbox)
         apply_to_all_children_widget(overlay_topbox, apply_fixed_size_policy)
         apply_to_all_children_widget(overlay_botbox, apply_fixed_size_policy)
@@ -252,6 +282,7 @@ class GUI(QWidget):
         control_subbox = QVBoxLayout()
         control_topbox = QHBoxLayout()
         control_botbox = QHBoxLayout()
+        control_topbox.addWidget(self.forward_step_button)
         control_topbox.addWidget(self.commit_button)
         control_topbox.addWidget(self.forward_run_button)
         control_topbox.addWidget(self.backward_run_button)
@@ -418,18 +449,27 @@ class GUI(QWidget):
 
     def forward_propagation_start(self):
         self.backward_run_button.setEnabled(False)
+        self.forward_step_button.setEnabled(False)
         self.forward_run_button.setText('Pause propagation')
+
+    def forward_propagation_step(self):
+        self.forward_run_button.setEnabled(False)
+        self.backward_run_button.setEnabled(False)
+        self.forward_step_button.setText('Pause step')
 
     def backward_propagation_start(self):
         self.forward_run_button.setEnabled(False)
+        self.forward_step_button.setEnabled(False)
         self.backward_run_button.setText('Pause propagation')
 
     def pause_propagation(self):
         self.forward_run_button.setEnabled(True)
+        self.forward_step_button.setEnabled(True)
         self.backward_run_button.setEnabled(True)
         self.clear_all_mem_button.setEnabled(True)
         self.clear_non_perm_mem_button.setEnabled(True)
         self.forward_run_button.setText('Propagate forward')
+        self.forward_step_button.setText('Step forward')
         self.backward_run_button.setText('propagate backward')
         self.tl_slider.setEnabled(True)
 
@@ -478,7 +518,7 @@ class GUI(QWidget):
         r, g, b = davis_palette_np[object_id]
         rgb = f'rgb({r},{g},{b})'
         self.object_color.setStyleSheet('QLabel {background: ' + rgb + ';}')
-        self.object_color.setText(f'{object_id}')
+        self.object_color.setText(f'{self.name_objects[object_id-1]}')
 
     def progressbar_update(self, progress: float):
         self.progressbar.setValue(int(progress * 100))

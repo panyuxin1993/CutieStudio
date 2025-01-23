@@ -27,7 +27,7 @@ from gui.gui import GUI
 from gui.click_controller import ClickController
 from gui.reader import PropagationReader, get_data_loader
 from gui.exporter import convert_frames_to_video, convert_mask_to_binary
-from cutie.utils.download_models import download_models_if_needed
+from scripts.download_models import download_models_if_needed
 
 log = logging.getLogger()
 
@@ -53,6 +53,7 @@ class MainController():
         # reading arguments
         self.cfg = cfg
         self.num_objects = cfg['num_objects']
+        self.name_objects = cfg['name_objects']
         self.device = cfg['device']
         self.amp = cfg['amp']
 
@@ -278,6 +279,17 @@ class MainController():
             self.propagate_direction = 'forward'
             self.on_propagate()
 
+    def step_forward_propagation(self):
+        if self.propagating:
+            # acts as a pause button
+            self.propagating = False
+            self.propagate_direction = 'none'
+        else:
+            self.propagate_fn = self.on_next_frame
+            self.gui.forward_propagation_step()
+            self.propagate_direction = 'forward'
+            self.step_propagate()
+
     def on_backward_propagation(self):
         if self.propagating:
             # acts as a pause button
@@ -336,6 +348,64 @@ class MainController():
                 self.update_memory_gauges()
                 self.gui.process_events()
 
+                if self.curr_ti == 0 or self.curr_ti == self.T - 1:
+                    break
+
+            # stop the loop after one frame and clear memory
+            self.propagating = False
+            self.on_clear_memory()
+
+            self.curr_frame_dirty = False
+            self.on_pause()
+            self.on_slider_update()
+            self.gui.process_events()
+
+    def step_propagate(self):
+        # start to propagate for one frame
+        with autocast(self.device, enabled=(self.amp and self.device == 'cuda')):
+            self.convert_current_image_mask_torch()
+
+            self.gui.text(f'Propagation started at t={self.curr_ti}.')
+            self.processor.clear_sensory_memory()
+            self.curr_prob = self.processor.step(self.curr_image_torch,
+                                                 self.curr_prob[1:],
+                                                 idx_mask=False)
+            self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
+            # clear
+            self.interacted_prob = None
+            self.reset_this_interaction()
+            # override this for #41
+            self.show_current_frame(fast=True, invalid_soft_mask=True)
+
+            self.propagating = True
+
+            self.gui.clear_all_mem_button.setEnabled(False)
+            self.gui.clear_non_perm_mem_button.setEnabled(False)
+            self.gui.tl_slider.setEnabled(False)
+
+            dataset = PropagationReader(self.res_man, self.curr_ti, self.propagate_direction)
+            loader = get_data_loader(dataset, self.cfg.num_read_workers)
+
+            # propagate till the end
+            for data in loader:
+                if not self.propagating:
+                    break
+                self.curr_image_np, self.curr_image_torch = data
+                self.curr_image_torch = self.curr_image_torch.to(self.device, non_blocking=True)
+                self.propagate_fn()
+
+                self.curr_prob = self.processor.step(self.curr_image_torch)
+                self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
+
+                self.save_current_mask()
+                self.show_current_frame(fast=True)
+
+                self.update_memory_gauges()
+                self.gui.process_events()
+
+                # stop the loop after one frame and clear memory
+                self.propagating = False
+                self.on_clear_memory()
                 if self.curr_ti == 0 or self.curr_ti == self.T - 1:
                     break
 
