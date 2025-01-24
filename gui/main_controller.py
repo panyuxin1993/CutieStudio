@@ -90,7 +90,7 @@ class MainController():
         # visualization info
         self.vis_mode: str = 'davis'
         self.vis_image: np.ndarray = None
-        self.save_visualization_mode: str = 'None'
+        self.save_visualization_mode: str = 'Always'
         self.save_soft_mask: bool = False
 
         self.interacted_prob: torch.Tensor = None
