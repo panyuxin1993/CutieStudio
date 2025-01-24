@@ -140,7 +140,7 @@ If you are running this on a remote server, X11 forwarding is possible. Start by
 
 ## References
 
-- The mask area calculation functionality was contributed by [Yuxin Pan](https://github.com/panyuxin1993).
+- The mask area calculation functionality and some optimization of gui was contributed by [Yuxin Pan](https://github.com/panyuxin1993 or https://gitee.com/panyuxin_65b7).
 
 - The GUI tools uses [RITM](https://github.com/SamsungLabs/ritm_interactive_segmentation) for interactive image segmentation. This repository also contains a redistribution of their code in `gui/ritm`. That part of code follows RITM's license.
 
