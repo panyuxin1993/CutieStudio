@@ -115,12 +115,17 @@ If you are running this on a remote server, X11 forwarding is possible. Start by
 
 ## Recent Updates
 
-### 2025-01
+### 2025-02
 - Added mask area calculation functionality to the interactive GUI
   - New button and text field for exporting mask areas to CSV
   - Supports custom object naming through `--name_objects` parameter
   - Uses standard DAVIS color palette for consistent object identification
   - Exports frame-by-frame area measurements for each object
+- Improved mask area calculation
+  - Now handles objects that appear in any frame (not just the first frame)
+  - Maintains consistent column names based on user-provided object names
+  - Automatically fills missing object areas with 0 values
+  - Better integration with the GUI's color mapping system
 
 ## Training and Evaluation
 

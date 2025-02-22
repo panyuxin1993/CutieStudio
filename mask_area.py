@@ -15,15 +15,14 @@ def get_davis_color_mapping():
     davis_colors = [tuple(color) for color in davis_palette_np]
     return davis_colors
 
-def calculate_mask_areas(mask_dir):
+def calculate_mask_areas(mask_dir, num_objects=None, object_names=None):
     """
     Calculate areas for each object mask in DAVIS dataset frames.
     
-    The masks contain multiple colors, where each unique color represents
-    a different object. Colors follow the standard DAVIS dataset palette.
-    
     Args:
         mask_dir (str or Path): Directory containing mask PNG files
+        num_objects (int, optional): Number of objects to track
+        object_names (list, optional): List of object names
         
     Returns:
         pd.DataFrame: DataFrame with frame indices and object areas
@@ -33,54 +32,34 @@ def calculate_mask_areas(mask_dir):
     
     if not mask_files:
         raise ValueError(f"No PNG files found in {mask_dir}")
-        
-    # Read first mask to get number of objects
-    first_mask = cv2.imread(str(mask_files[0]))  # Read as BGR
-    if first_mask is None:
-        raise ValueError(f"Could not read mask file: {mask_files[0]}")
-    
-    # Convert to RGB for more intuitive color representation
-    first_mask_rgb = cv2.cvtColor(first_mask, cv2.COLOR_BGR2RGB)
-    
-    # Find unique colors by reshaping to 2D array of RGB values
-    colors = first_mask_rgb.reshape(-1, 3)
-    unique_colors = np.unique(colors, axis=0)
     
     # Get standard DAVIS colors
     davis_colors = get_davis_color_mapping()
     
-    # Create mapping from RGB values to sequential IDs based on DAVIS order
-    color_to_id = {}
-    print("\nObject color mapping (DAVIS standard order):")
-    print("Background: RGB(0, 0, 0)")
-    
-    # First find which DAVIS colors are present in the mask
-    next_id = 1
-    for davis_color in davis_colors[1:]:  # Skip background
-        if any(np.all(color == davis_color) for color in unique_colors):
-            color_to_id[davis_color] = next_id
-            print(f"Object {next_id}: RGB{davis_color}")
-            next_id += 1
-    
-    # Handle any colors not in standard DAVIS palette (should be rare)
-    for color in unique_colors:
-        color_tuple = tuple(color)
-        if color_tuple == (0, 0, 0):  # Skip background
-            continue
-        if color_tuple not in color_to_id and not any(np.all(color == dc) for dc in davis_colors):
-            color_to_id[color_tuple] = next_id
-            print(f"Object {next_id}: RGB{color_tuple} (Non-standard color)")
-            next_id += 1
-    print()
-    
-    # Initialize results dictionary
+    # Initialize results dictionary with predefined columns
     results = {
         'frame': []  # Frame index column
     }
     
-    # Add columns for each object using sequential IDs
-    for obj_id in range(1, len(color_to_id) + 1):
-        results[f'object_{obj_id}'] = []
+    # Add columns for each object using provided names or default names
+    if object_names:
+        for i, name in enumerate(object_names, 1):
+            results[name] = []
+    else:
+        for i in range(1, (num_objects or 1) + 1):
+            results[f'object_{i}'] = []
+    
+    # Create color to object ID mapping using DAVIS palette
+    color_to_id = {}
+    for i in range(1, (num_objects or 1) + 1):
+        color_to_id[tuple(davis_colors[i])] = i
+    
+    print("\nObject color mapping (DAVIS standard order):")
+    print("Background: RGB(0, 0, 0)")
+    for i, (color, obj_id) in enumerate(color_to_id.items(), 1):
+        name = object_names[i-1] if object_names else f'object_{i}'
+        print(f"{name}: RGB{color}")
+    print()
     
     # Process each mask
     print("Processing masks...")
@@ -97,30 +76,39 @@ def calculate_mask_areas(mask_dir):
         # Add frame index
         results['frame'].append(frame_idx)
         
-        # Calculate area for each object
-        for color, obj_id in color_to_id.items():
-            # Create boolean mask for this color
-            color_mask = np.all(mask_rgb == color, axis=2)
-            area = np.sum(color_mask)
-            results[f'object_{obj_id}'].append(area)
+        # Calculate area for each predefined object
+        if object_names:
+            for i, name in enumerate(object_names, 1):
+                color = tuple(davis_colors[i])
+                color_mask = np.all(mask_rgb == color, axis=2)
+                area = np.sum(color_mask)
+                results[name].append(area)
+        else:
+            for i in range(1, (num_objects or 1) + 1):
+                color = tuple(davis_colors[i])
+                color_mask = np.all(mask_rgb == color, axis=2)
+                area = np.sum(color_mask)
+                results[f'object_{i}'].append(area)
     
     # Convert to DataFrame
     df = pd.DataFrame(results)
     
     return df
 
-
 def main():
     """Main function to run the mask area calculation"""
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Calculate object areas from DAVIS dataset masks. '
-                  'Colors are mapped according to standard DAVIS palette.'
+        description='Calculate object areas from DAVIS dataset masks.'
     )
     parser.add_argument('mask_dir', type=str, help='Directory containing mask PNG files')
     parser.add_argument('--output', type=str, default=None, 
                       help='Output CSV file path (default: ../mask_area.csv relative to mask_dir)')
+    parser.add_argument('--num_objects', type=int, default=None,
+                      help='Number of objects to track')
+    parser.add_argument('--object_names', nargs='+', type=str, default=None,
+                      help='Names of the objects to track')
     
     args = parser.parse_args()
     
@@ -136,13 +124,11 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Calculate areas
-        df = calculate_mask_areas(args.mask_dir)
+        df = calculate_mask_areas(args.mask_dir, args.num_objects, args.object_names)
         
         # Save to CSV
         df.to_csv(output_path, index=False)
         print(f"\nResults saved to {output_path}")
-        print("Column names use sequential object IDs following DAVIS color order")
-        print("See the color mapping above to identify which color corresponds to each object")
         
     except Exception as e:
         print(f"Error: {str(e)}")

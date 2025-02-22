@@ -705,13 +705,10 @@ class MainController():
             self.gui.text(f'Exporting mask areas -- please wait')
             self.gui.process_events()
             try:
-                # Calculate areas
-                df = calculate_mask_areas(mask_folder)
-                # Rename columns to use custom object names
-                new_columns = {'frame': 'frame'}
-                for i, name in enumerate(self.name_objects, 1):
-                    new_columns[f'object_{i}'] = name
-                df = df.rename(columns=new_columns)
+                # Calculate areas with object names and number of objects
+                df = calculate_mask_areas(mask_folder, 
+                                        num_objects=self.num_objects,
+                                        object_names=self.name_objects)
                 # Save to CSV
                 df.to_csv(output_filename, index=False)
                 self.gui.text(f'Mask areas exported to {output_filename}')
