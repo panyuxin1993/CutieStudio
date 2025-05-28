@@ -6,7 +6,8 @@ from omegaconf import DictConfig
 
 from PySide6.QtWidgets import (QWidget, QComboBox, QCheckBox, QHBoxLayout, QLabel, QPushButton,
                                QTextEdit, QSpinBox, QPlainTextEdit, QVBoxLayout, QSizePolicy,
-                               QButtonGroup, QSlider, QRadioButton, QApplication, QFileDialog, QLineEdit)
+                               QButtonGroup, QSlider, QRadioButton, QApplication, QFileDialog, QLineEdit,
+                               QFrame, QDialog)
 
 from PySide6.QtGui import (QKeySequence, QShortcut, QTextCursor, QImage, QPixmap, QIcon)
 from PySide6.QtCore import Qt, QTimer
@@ -212,13 +213,16 @@ class GUI(QWidget):
         with open(Path(__file__).parent / 'TIPS.md', 'r') as f:
             self.tips.setMarkdown(f.read())
 
+        # Manual button
+        self.manual_button = QPushButton('Manual')
+        self.manual_button.clicked.connect(self.show_manual)
+
         # navigator
         navi = QHBoxLayout()
 
         interact_subbox = QVBoxLayout()
         interact_topbox = QHBoxLayout()
         interact_botbox = QHBoxLayout()
-        item_layout = QHBoxLayout()
         interact_topbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
         interact_topbox.addWidget(self.lcd)
         interact_topbox.addWidget(self.play_button)
@@ -228,40 +232,17 @@ class GUI(QWidget):
         interact_botbox.addWidget(self.object_dial)
         interact_botbox.addWidget(self.object_color)
         interact_botbox.addWidget(self.frame_name)
-        # list of all objects
-        item_layout.addWidget(QLabel('All objects:'))
-        for item in range(controller.num_objects):
-            object_id = item + 1
-            r, g, b = davis_palette_np[object_id]
-            rgb = f'rgb({r},{g},{b})'
-
-            # Create color box
-            color_label = QLabel()
-            color_label.setStyleSheet('QLabel {background: ' + rgb + ';}')
-            color_label.setText(f'{self.name_objects[object_id-1]}')
-            color_label.setMinimumSize(30, 30)
-            color_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            # Create ID and name labels
-            id_label = QLabel(str(item+1))
-            #name_label = QLabel(self.name_objects[item])
-            
-            # Add widgets to the layout
-            item_layout.addWidget(id_label)
-            item_layout.addWidget(color_label)
-            #item_layout.addWidget(name_label)
-            
+        
+        # Add the top and bottom boxes
         interact_subbox.addLayout(interact_topbox)
         interact_subbox.addLayout(interact_botbox)
-        interact_subbox.addLayout(item_layout)
         interact_botbox.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        navi.addLayout(interact_subbox)
 
-        apply_fixed_size_policy = lambda x: x.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.
-                                                            Policy.Fixed)
+        apply_fixed_size_policy = lambda x: x.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         apply_to_all_children_widget(interact_topbox, apply_fixed_size_policy)
         apply_to_all_children_widget(interact_botbox, apply_fixed_size_policy)
 
-        navi.addStretch(1)
+        navi.addLayout(interact_subbox)
         navi.addStretch(1)
         overlay_subbox = QVBoxLayout()
         overlay_topbox = QHBoxLayout()
@@ -306,40 +287,140 @@ class GUI(QWidget):
         control_subbox.addLayout(control_botbox)
         navi.addLayout(control_subbox)
 
-        # Drawing area main canvas
-        draw_area = QHBoxLayout()
-        draw_area.addWidget(self.main_canvas, 4)
+        # left area
+        left_area = QVBoxLayout()
+        left_area.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        # Add Manual button at the top
+        left_area.addWidget(self.manual_button)
+        
+        # Add separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        left_area.addWidget(line)
+        
+        # Add object list section
+        item_layout = QVBoxLayout()
+        item_layout.setSpacing(5)  # Add spacing between rows
+        
+        # Add title
+        title_label = QLabel('Object List')
+        title_label.setStyleSheet('font-weight: bold;')
+        item_layout.addWidget(title_label)
+        
+        # Add header row
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)  # Add spacing between columns
+        id_header = QLabel('ID')
+        id_header.setMinimumWidth(30)
+        id_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        obj_header = QLabel('Object')
+        obj_header.setMinimumWidth(100)
+        show_header = QLabel('Show')
+        show_header.setMinimumWidth(50)
+        track_header = QLabel('Track')
+        track_header.setMinimumWidth(50)
+        
+        header_layout.addWidget(id_header)
+        header_layout.addWidget(obj_header)
+        header_layout.addWidget(show_header)
+        header_layout.addWidget(track_header)
+        item_layout.addLayout(header_layout)
+        
+        # Add separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        item_layout.addWidget(line)
+        
+        # Add object rows
+        self.vis_checkboxes = []
+        self.track_checkboxes = []
+        for item in range(controller.num_objects):
+            object_id = item + 1
+            r, g, b = davis_palette_np[object_id]
+            rgb = f'rgb({r},{g},{b})'
 
-        # right area
-        right_area = QVBoxLayout()
-        right_area.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        right_area.addWidget(self.tips)
-        # right_area.addStretch(1)
-
-        # Parameters
-        right_area.addLayout(self.perm_mem_gauge_layout)
-        right_area.addLayout(self.work_mem_gauge_layout)
-        right_area.addLayout(self.long_mem_gauge_layout)
-        right_area.addLayout(self.gpu_mem_gauge_layout)
-        right_area.addLayout(self.torch_mem_gauge_layout)
-        right_area.addWidget(self.clear_all_mem_button)
-        right_area.addWidget(self.clear_non_perm_mem_button)
-        right_area.addLayout(self.work_mem_min_layout)
-        right_area.addLayout(self.work_mem_max_layout)
-        right_area.addLayout(self.long_mem_max_layout)
-        right_area.addLayout(self.mem_every_box_layout)
+            # Create row layout
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(10)  # Add spacing between columns
+            
+            # Create ID label
+            id_label = QLabel(str(object_id))
+            id_label.setMinimumWidth(30)
+            id_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # Create color box with name
+            color_label = QLabel()
+            color_label.setStyleSheet('QLabel {background: ' + rgb + ';}')
+            color_label.setText(f'{self.name_objects[object_id-1]}')
+            color_label.setMinimumSize(100, 30)
+            color_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # Create visualization checkbox
+            vis_checkbox = QCheckBox('Show')
+            vis_checkbox.setChecked(True)  # Default to showing all masks
+            vis_checkbox.stateChanged.connect(lambda state, obj_id=object_id: controller.on_vis_checkbox_change(obj_id, state))
+            self.vis_checkboxes.append(vis_checkbox)
+            
+            # Create tracking checkbox
+            track_checkbox = QCheckBox('Track')
+            track_checkbox.setChecked(True)  # Default to tracking all objects
+            track_checkbox.stateChanged.connect(lambda state, obj_id=object_id: controller.on_track_checkbox_change(obj_id, state))
+            self.track_checkboxes.append(track_checkbox)
+            
+            # Add widgets to row layout
+            row_layout.addWidget(id_label)
+            row_layout.addWidget(color_label)
+            row_layout.addWidget(vis_checkbox)
+            row_layout.addWidget(track_checkbox)
+            
+            # Add row to main layout
+            item_layout.addLayout(row_layout)
+        
+        # Add object list to left area
+        left_area.addLayout(item_layout)
+        
+        # Add separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        left_area.addWidget(line)
+        
+        # Add memory gauges and controls to left area
+        left_area.addLayout(self.perm_mem_gauge_layout)
+        left_area.addLayout(self.work_mem_gauge_layout)
+        left_area.addLayout(self.long_mem_gauge_layout)
+        left_area.addLayout(self.gpu_mem_gauge_layout)
+        left_area.addLayout(self.torch_mem_gauge_layout)
+        left_area.addWidget(self.clear_all_mem_button)
+        left_area.addWidget(self.clear_non_perm_mem_button)
+        left_area.addLayout(self.work_mem_min_layout)
+        left_area.addLayout(self.work_mem_max_layout)
+        left_area.addLayout(self.long_mem_max_layout)
+        left_area.addLayout(self.mem_every_box_layout)
 
         # import mask/layer
         import_area = QHBoxLayout()
         import_area.setAlignment(Qt.AlignmentFlag.AlignBottom)
         import_area.addWidget(self.import_mask_button)
         import_area.addWidget(self.import_layer_button)
-        right_area.addLayout(import_area)
+        left_area.addLayout(import_area)
 
-        # console
-        right_area.addWidget(self.console)
+        # Add separator line before console
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        left_area.addWidget(line)
 
-        draw_area.addLayout(right_area, 1)
+        # Add console to left area
+        left_area.addWidget(self.console)
+
+        # Drawing area main canvas
+        draw_area = QHBoxLayout()
+        draw_area.addWidget(self.main_canvas, 6)  # Increased ratio for main canvas
+        draw_area.addLayout(left_area, 1)  # Left panel takes less space
 
         layout = QVBoxLayout()
         layout.addLayout(draw_area)
@@ -540,3 +621,25 @@ class GUI(QWidget):
     def progressbar_update(self, progress: float):
         self.progressbar.setValue(int(progress * 100))
         self.process_events()
+
+    def show_manual(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manual")
+        dialog.setMinimumSize(600, 400)
+        
+        layout = QVBoxLayout()
+        
+        # Create a new text edit for the tips
+        tips_text = QTextEdit()
+        tips_text.setReadOnly(True)
+        tips_text.setMarkdown(self.tips.toMarkdown())
+        
+        layout.addWidget(tips_text)
+        
+        # Add close button
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+        
+        dialog.setLayout(layout)
+        dialog.exec()

@@ -5,6 +5,18 @@ Use permanent memory to store accurate segmentation (commit good frames to it) f
 The first frame to enter the memory bank is always committed to the permanent memory.
 Reset memory if needed.
 
+GUI Layout:
+
+- The main canvas is in the center, showing the current frame with object masks.
+- The right panel contains the object list and memory controls:
+  - Object list shows all objects with their IDs, names, and control checkboxes
+  - "Show" checkbox controls whether an object's mask is visible in the main canvas
+  - "Track" checkbox controls whether an object is included in propagation
+  - Memory gauges and controls are below the object list
+  - The 'manual' buttom will show tips 
+  - console output
+- The bottom panel contains frame navigation and propagation controls
+
 Controls:
 
 - Use left-click for foreground annotation and right-click for background annotation.

@@ -9,7 +9,7 @@ mask_endpoint: masks
 vis_endpoint: vis
 
 amp: True
-weights: weights/cutie-base-mega.pth
+weights: weights/ratcity_DAVIS_1.pth
 ritm_weights: weights/coco_lvis_h18_itermask.pth
 
 # All "size" parameters represent the length of the shorter edge
