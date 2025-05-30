@@ -37,6 +37,11 @@ class GUI(QWidget):
         self.setGeometry(100, 100, self.w + 200, self.h + 200)
         self.setWindowIcon(QIcon('docs/icon.png'))
 
+        # Initialize save soft mask checkbox first
+        self.save_soft_mask_checkbox = QCheckBox(self)
+        self.save_soft_mask_checkbox.setChecked(True)  # Default to saving soft masks
+        self.save_soft_mask_checkbox.toggled.connect(controller.on_save_soft_mask_toggle)
+
         # Add mask area export controls
         self.mask_area_filename = QLineEdit()
         self.mask_area_filename.setPlaceholderText("Enter output CSV filename")
@@ -105,12 +110,14 @@ class GUI(QWidget):
 
         # timeline slider
         self.tl_slider = QSlider(Qt.Orientation.Horizontal)
+        self.tl_slider.setTracking(True)  # Enable real-time tracking
         self.tl_slider.valueChanged.connect(controller.on_slider_update)
         self.tl_slider.setMinimum(0)
         self.tl_slider.setMaximum(controller.T - 1)
         self.tl_slider.setValue(0)
         self.tl_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.tl_slider.setTickInterval(1)
+        self.tl_slider.setEnabled(True)  # Ensure slider is enabled by default
 
         # combobox
         self.combo = QComboBox(self)
@@ -131,10 +138,6 @@ class GUI(QWidget):
         self.save_visualization_combo.setCurrentText('Always')
         self.save_visualization_combo.currentTextChanged.connect(
             controller.on_set_save_visualization_mode)
-
-        self.save_soft_mask_checkbox = QCheckBox(self)
-        self.save_soft_mask_checkbox.toggled.connect(controller.on_save_soft_mask_toggle)
-        self.save_soft_mask_checkbox.setChecked(False)
 
         # controls for output FPS and bitrate
         self.fps_dial = QSpinBox()
@@ -337,44 +340,44 @@ class GUI(QWidget):
         # Add object rows
         self.vis_checkboxes = []
         self.track_checkboxes = []
-        for item in range(controller.num_objects):
-            object_id = item + 1
-            r, g, b = davis_palette_np[object_id]
-            rgb = f'rgb({r},{g},{b})'
-
+        for obj_id in range(1, self.controller.num_objects + 1):
             # Create row layout
             row_layout = QHBoxLayout()
             row_layout.setSpacing(10)  # Add spacing between columns
             
             # Create ID label
-            id_label = QLabel(str(object_id))
+            id_label = QLabel(str(obj_id))
             id_label.setMinimumWidth(30)
             id_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
             # Create color box with name
+            r, g, b = davis_palette_np[obj_id]
+            rgb = f'rgb({r},{g},{b})'
             color_label = QLabel()
             color_label.setStyleSheet('QLabel {background: ' + rgb + ';}')
-            color_label.setText(f'{self.name_objects[object_id-1]}')
-            color_label.setMinimumSize(100, 30)
+            color_label.setText(f'{self.name_objects[obj_id-1]}')
+            color_label.setMinimumWidth(100)
             color_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
-            # Create visualization checkbox
-            vis_checkbox = QCheckBox('Show')
-            vis_checkbox.setChecked(True)  # Default to showing all masks
-            vis_checkbox.stateChanged.connect(lambda state, obj_id=object_id: controller.on_vis_checkbox_change(obj_id, state))
-            self.vis_checkboxes.append(vis_checkbox)
+            # Create checkboxes
+            vis_cb = QCheckBox()
+            track_cb = QCheckBox()
+            vis_cb.setChecked(True)  # Default to visible
+            track_cb.setChecked(True)  # Default to tracked
             
-            # Create tracking checkbox
-            track_checkbox = QCheckBox('Track')
-            track_checkbox.setChecked(True)  # Default to tracking all objects
-            track_checkbox.stateChanged.connect(lambda state, obj_id=object_id: controller.on_track_checkbox_change(obj_id, state))
-            self.track_checkboxes.append(track_checkbox)
+            # Connect checkboxes to handlers
+            vis_cb.stateChanged.connect(lambda state, obj_id=obj_id: controller.on_vis_checkbox_change(obj_id, state))
+            track_cb.stateChanged.connect(lambda state, obj_id=obj_id: controller.on_track_checkbox_change(obj_id, state))
+            
+            # Store checkboxes for later reference
+            self.vis_checkboxes.append(vis_cb)
+            self.track_checkboxes.append(track_cb)
             
             # Add widgets to row layout
             row_layout.addWidget(id_label)
             row_layout.addWidget(color_label)
-            row_layout.addWidget(vis_checkbox)
-            row_layout.addWidget(track_checkbox)
+            row_layout.addWidget(vis_cb)
+            row_layout.addWidget(track_cb)
             
             # Add row to main layout
             item_layout.addLayout(row_layout)
@@ -506,9 +509,13 @@ class GUI(QWidget):
         self.main_canvas_size = self.main_canvas.size()
         self.image_size = qImg.size()
 
+
     def update_slider(self, value):
+        """Update slider value and display"""
+        print(f"Updating slider to value: {value}")
         self.lcd.setText('{: 3d} / {: 3d}'.format(value, self.controller.T - 1))
         self.tl_slider.setValue(value)
+        print(f"Slider updated to: {self.tl_slider.value()}")
 
     def pixel_pos_to_image_pos(self, x, y):
         # Un-scale and un-pad the label coordinates into image coordinates
@@ -561,6 +568,8 @@ class GUI(QWidget):
         self.backward_run_button.setText('Pause propagation')
 
     def pause_propagation(self):
+        """Reset propagation state and enable controls"""
+        print("GUI: Pausing propagation")
         self.forward_run_button.setEnabled(True)
         self.forward_step_button.setEnabled(True)
         self.backward_run_button.setEnabled(True)
@@ -569,7 +578,8 @@ class GUI(QWidget):
         self.forward_run_button.setText('Propagate forward')
         self.forward_step_button.setText('Step forward')
         self.backward_run_button.setText('propagate backward')
-        self.tl_slider.setEnabled(True)
+        self.tl_slider.setEnabled(True)  # Ensure slider is enabled after propagation
+        print("Controls re-enabled")
 
     def process_events(self):
         QApplication.processEvents()

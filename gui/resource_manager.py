@@ -14,7 +14,7 @@ if not hasattr(Image, 'Resampling'):  # Pillow<9.0
     Image.Resampling = Image
 import numpy as np
 
-from cutie.utils.palette import davis_palette
+from cutie.utils.palette import davis_palette, davis_palette_np
 from tqdm import tqdm
 
 log = logging.getLogger()
@@ -59,7 +59,7 @@ class ResourceManager:
         video = cfg['video']
         self.workspace = cfg['workspace']
         self.max_size = cfg['max_overall_size']
-        self.palette = davis_palette
+        self.palette = davis_palette_np.flatten().tolist()  # Convert to list of RGB values
 
         # create temporary workspace if not specified
         if self.workspace is None:
@@ -92,10 +92,12 @@ class ResourceManager:
         self.mask_dir = path.join(self.workspace, 'masks')
         self.visualization_dir = path.join(self.workspace, 'visualization')
         self.soft_mask_dir = path.join(self.workspace, 'soft_masks')
+        self.all_masks_dir = path.join(self.workspace, 'all_masks')
         os.makedirs(self.image_dir, exist_ok=True)
         os.makedirs(self.mask_dir, exist_ok=True)
         os.makedirs(self.visualization_dir, exist_ok=True)
         os.makedirs(self.soft_mask_dir, exist_ok=True)
+        os.makedirs(self.all_masks_dir, exist_ok=True)
 
         # create all soft mask sub-directories
         for i in range(1, cfg['num_objects'] + 1):
@@ -148,6 +150,7 @@ class ResourceManager:
             if args is None:
                 queue.task_done()
                 break
+            print(f"Processing save item: type={args.type}, name={args.name}")
             if args.type == 'mask':
                 # PIL image
                 args.data.save(path.join(self.mask_dir, args.name + '.png'))
@@ -165,12 +168,15 @@ class ResourceManager:
                                 data)
             elif args.type == 'soft_mask':
                 # numpy array, save each channel with cv2
+                print(f"Saving soft mask for {args.name}")
                 num_channels = args.data.shape[0]
                 # first channel is background -- ignore
                 for i in range(1, num_channels):
                     data = args.data[i]
                     data = (data * 255).astype(np.uint8)
-                    cv2.imwrite(path.join(self.soft_mask_dir, f'{i}', args.name + '.png'), data)
+                    save_path = path.join(self.soft_mask_dir, f'{i}', args.name + '.png')
+                    print(f"Saving to {save_path}")
+                    cv2.imwrite(save_path, data)
             else:
                 raise NotImplementedError
             queue.task_done()
@@ -222,24 +228,109 @@ class ResourceManager:
         assert 0 <= ti < self.length
         assert isinstance(mask, np.ndarray)
 
-        mask = Image.fromarray(mask)
-        mask.putpalette(self.palette)
+        # Convert to PIL Image in 'P' mode
+        mask_img = Image.fromarray(mask, mode='P')
+        
+        # Ensure palette is in correct format (list of RGB values)
+        if isinstance(self.palette, bytes):
+            # Convert binary palette to list of RGB values
+            palette_list = []
+            for i in range(0, len(self.palette), 3):
+                palette_list.extend([self.palette[i], self.palette[i+1], self.palette[i+2]])
+            mask_img.putpalette(palette_list)
+        else:
+            # If palette is already in correct format, use directly
+            mask_img.putpalette(self.palette)
+            
         self.invalidate(ti)
-        self.add_to_queue_with_warning(SaveItem('mask', mask, self.names[ti]))
+        self.add_to_queue_with_warning(SaveItem('mask', mask_img, self.names[ti]))
 
     def save_visualization(self, ti: int, vis_mode: str, image: np.ndarray):
         # image should be uint8 3*H*W
         assert 0 <= ti < self.length
         assert isinstance(image, np.ndarray)
 
-        self.add_to_queue_with_warning(SaveItem(f'visualization_{vis_mode}', image, self.names[ti]))
+        # Save visualization in visualization/davis folder
+        vis_dir = path.join(self.workspace, 'visualization', 'davis')
+        os.makedirs(vis_dir, exist_ok=True)
+        name = self.names[ti]
 
-    def save_soft_mask(self, ti: int, prob: np.ndarray):
-        # mask should be float (num_objects+1)*H*W np array
-        assert 0 <= ti < self.length
-        assert isinstance(prob, np.ndarray)
+        self.add_to_queue_with_warning(SaveItem(f'visualization_{vis_mode}', image, name))
 
-        self.add_to_queue_with_warning(SaveItem('soft_mask', prob, self.names[ti]))
+    def save_soft_mask(self, ti: int, prob: np.ndarray, obj_id: int = None):
+        """Save soft mask for a specific object or all objects as binary images"""
+        print(f"Saving soft mask for frame {ti}, obj_id: {obj_id}")
+        if obj_id is not None:
+            # Save individual object mask in its subfolder
+            save_path = os.path.join(self.workspace, 'soft_masks', f'{obj_id}', f'{ti:07d}.png')
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            # Convert probability to binary mask
+            binary_mask = (prob > 0.5).astype(np.uint8) * 255
+            cv2.imwrite(save_path, binary_mask)
+            print(f"Saved soft mask to {save_path}")
+        else:
+            # Save all object masks
+            for obj_id in range(1, prob.shape[0]):
+                save_path = os.path.join(self.workspace, 'soft_masks', f'{obj_id}', f'{ti:07d}.png')
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                # Convert probability to binary mask
+                binary_mask = (prob[obj_id] > 0.5).astype(np.uint8) * 255
+                cv2.imwrite(save_path, binary_mask)
+                print(f"Saved soft mask to {save_path}")
+        
+        # Update all_masks after saving soft masks
+        print(f"Updating all_masks for frame {ti}")
+        self.update_all_masks(ti)
+
+    def update_all_masks(self, ti: int):
+        """Combine all available masks from soft_masks into a single mask in all_masks"""
+        print(f"Updating all_masks for frame {ti}")
+        # Get all object directories
+        obj_dirs = [d for d in os.listdir(self.soft_mask_dir) if os.path.isdir(os.path.join(self.soft_mask_dir, d))]
+        
+        if not obj_dirs:
+            print("No object directories found in soft_masks")
+            return
+            
+        # Find first valid mask to get dimensions
+        h, w = None, None
+        for obj_id in obj_dirs:
+            mask_path = os.path.join(self.soft_mask_dir, obj_id, f'{ti:07d}.png')
+            if os.path.exists(mask_path):
+                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    h, w = mask.shape
+                    break
+                    
+        if h is None or w is None:
+            print(f"No valid masks found for frame {ti}")
+            return
+            
+        # Create a combined mask
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Combine masks from all objects
+        for obj_id in obj_dirs:
+            mask_path = os.path.join(self.soft_mask_dir, obj_id, f'{ti:07d}.png')
+            if os.path.exists(mask_path):
+                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    # Use object ID as the mask value
+                    combined_mask[mask > 127] = int(obj_id)
+        
+        # Save combined mask in DAVIS format
+        mask_img = Image.fromarray(combined_mask, mode='P')
+        mask_img.putpalette(self.palette)
+        mask_img.save(os.path.join(self.all_masks_dir, f'{ti:07d}.png'))
+        print(f"Saved combined mask to {os.path.join(self.all_masks_dir, f'{ti:07d}.png')}")
+
+    def get_all_masks(self, ti: int) -> np.ndarray:
+        """Get the combined mask from all_masks directory"""
+        mask_path = os.path.join(self.all_masks_dir, f'{ti:07d}.png')
+        if os.path.exists(mask_path):
+            mask = Image.open(mask_path)
+            return np.array(mask)
+        return None
 
     def _get_image_unbuffered(self, ti: int):
         # returns H*W*3 uint8 array

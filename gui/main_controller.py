@@ -16,6 +16,7 @@ from torch import autocast
 from torchvision.transforms.functional import to_tensor
 import numpy as np
 from omegaconf import DictConfig, open_dict
+from PySide6.QtCore import Qt
 
 from cutie.model.cutie import CUTIE
 from cutie.inference.inference_core import InferenceCore
@@ -58,6 +59,10 @@ class MainController():
         self.device = cfg['device']
         self.amp = cfg['amp']
 
+        # Initialize sets for visible and tracked objects
+        self.visible_objects = set(range(1, self.num_objects + 1))  # All objects visible by default
+        self.tracked_objects = set(range(1, self.num_objects + 1))  # All objects tracked by default
+
         # initializing the network(s)
         self.initialize_networks()
 
@@ -66,6 +71,11 @@ class MainController():
         if 'workspace_init_only' in cfg and cfg['workspace_init_only']:
             return
         self.processor = InferenceCore(self.cutie, self.cfg)
+        
+        # Initialize save_soft_mask flag
+        self.save_soft_mask = True
+        
+        # Create GUI after initializing other components
         self.gui = GUI(self, self.cfg)
 
         # initialize control info
@@ -91,7 +101,6 @@ class MainController():
         self.vis_mode: str = 'davis'
         self.vis_image: np.ndarray = None
         self.save_visualization_mode: str = 'Always'
-        self.save_soft_mask: bool = False
 
         self.interacted_prob: torch.Tensor = None
         self.overlay_layer: np.ndarray = None
@@ -100,7 +109,9 @@ class MainController():
         # the object id used for popup/layer overlay
         self.vis_target_objects = list(range(1, self.num_objects + 1))
 
+        print("Loading initial frame...")
         self.load_current_image_mask()
+        self.convert_current_image_mask_torch()
         self.show_current_frame()
 
         # initialize stuff
@@ -188,59 +199,142 @@ class MainController():
                 raise NotImplementedError
 
     def load_current_image_mask(self, no_mask: bool = False):
-        self.curr_image_np = self.res_man.get_image(self.curr_ti)
-        self.curr_image_torch = None
+        """Load the current frame's image and mask"""
+        print(f"Loading current image mask for frame {self.curr_ti}")
+        try:
+            self.curr_image_np = self.res_man.get_image(self.curr_ti)
+            print(f"Loaded image shape: {self.curr_image_np.shape}")
+            self.curr_image_torch = None
 
-        if not no_mask:
-            loaded_mask = self.res_man.get_mask(self.curr_ti)
-            if loaded_mask is None:
-                self.curr_mask.fill(0)
-            else:
-                self.curr_mask = loaded_mask.copy()
-            self.curr_prob = None
+            if not no_mask:
+                loaded_mask = self.res_man.get_all_masks(self.curr_ti)
+                if loaded_mask is None:
+                    print("No mask found, using empty mask")
+                    self.curr_mask.fill(0)
+                else:
+                    print("Loaded existing mask")
+                    # # Get unique object IDs and remap them to sequential indices
+                    # unique_ids = np.unique(loaded_mask)
+                    # object_ids = [id for id in unique_ids if id > 0]
+                    # id_map = {id: idx+1 for idx, id in enumerate(object_ids)}  # 0 stays 0 (background)
+                    # remapped_mask = np.zeros_like(loaded_mask)
+                    # for orig_id, new_id in id_map.items():
+                    #     remapped_mask[loaded_mask == orig_id] = new_id
+                    # print(f"Remapped object IDs: {id_map}")
+                    # self.curr_mask = remapped_mask
+                    self.curr_mask = loaded_mask.copy()
+                self.curr_prob = None
+        except Exception as e:
+            print(f"Error loading frame {self.curr_ti}: {str(e)}")
+            raise
 
     def convert_current_image_mask_torch(self, no_mask: bool = False):
-        if self.curr_image_torch is None:
-            self.curr_image_torch = to_tensor(self.curr_image_np).to(self.device, non_blocking=True)
+        """Convert current frame to torch format"""
 
-        if self.curr_prob is None and not no_mask:
-            self.curr_prob = index_numpy_to_one_hot_torch(self.curr_mask, self.num_objects + 1).to(
-                self.device, non_blocking=True)
+        try:
+            if self.curr_image_torch is None:
+                self.curr_image_torch = to_tensor(self.curr_image_np).to(self.device, non_blocking=True)
+
+
+            if self.curr_prob is None and not no_mask:
+                # Ensure mask values are within valid range
+                if np.max(self.curr_mask) > self.num_objects:
+                    print(f"Warning: Mask contains object ID {np.max(self.curr_mask)} > num_objects {self.num_objects}")
+                    # Remap to valid range
+                    unique_ids = np.unique(self.curr_mask)
+                    object_ids = [id for id in unique_ids if id > 0]
+                    id_map = {id: idx+1 for idx, id in enumerate(object_ids)}  # 0 stays 0 (background)
+                    remapped_mask = np.zeros_like(self.curr_mask)
+                    for orig_id, new_id in id_map.items():
+                        remapped_mask[self.curr_mask == orig_id] = new_id
+                    self.curr_mask = remapped_mask
+                    print(f"Remapped object IDs: {id_map}")
+                
+                self.curr_prob = index_numpy_to_one_hot_torch(self.curr_mask, self.num_objects + 1).to(
+                    self.device, non_blocking=True)
+
+        except Exception as e:
+            print(f"Error converting to torch format: {str(e)}")
+            raise
 
     def compose_current_im(self):
-        self.vis_image = get_visualization(self.vis_mode, self.curr_image_np, self.curr_mask,
-                                           self.overlay_layer, self.vis_target_objects)
+        # Get combined mask from all_masks
+        combined_mask = self.res_man.get_all_masks(self.curr_ti)
+        if combined_mask is None:
+            # If no combined mask exists, create an empty mask
+            combined_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+            
+        # Only show masks for visible objects
+        visible_mask = combined_mask.copy()
+        for obj_id in range(1, self.num_objects + 1):
+            if obj_id not in self.visible_objects:
+                visible_mask[visible_mask == obj_id] = 0
+                
+        # Use visible_objects for basic visualization, vis_target_objects for popup/layer modes
+        target_objects = self.vis_target_objects if self.vis_mode in ['popup', 'layer'] else list(self.visible_objects)
+        self.vis_image = get_visualization(self.vis_mode, self.curr_image_np, visible_mask,
+                                           self.overlay_layer, target_objects)
 
     def update_canvas(self):
+        self.compose_current_im()
         self.gui.set_canvas(self.vis_image)
 
     def update_current_image_fast(self, invalid_soft_mask: bool = False):
-        # fast path, uses gpu. Changes the image in-place to avoid copying
-        # thus current_image_torch must be voided afterwards
-        # do_no_save_soft_mask is an override to solve #41
+        """Update the current image with fast visualization"""
+        if self.curr_prob is None:
+            return
+            
+        # Save soft masks for tracked objects
+        if self.save_soft_mask:
+            print(f"Saving soft masks for tracked objects: {self.tracked_objects}")
+            for obj_id in range(1, self.num_objects + 1):
+                if obj_id in self.tracked_objects:
+                    obj_mask = self.curr_prob[obj_id].cpu().numpy()
+                    self.res_man.save_soft_mask(self.curr_ti, obj_mask, obj_id)
+                    
+        # Update visualization
+        self.show_current_frame()
+
+    def show_current_frame(self, fast: bool = False, invalid_soft_mask: bool = False):
+        """Show the current frame with proper visibility handling"""
+
+        if self.curr_prob is None:
+            print("No probability mask available")
+            return
+            
+        # Ensure we have the torch tensors
+        if self.curr_image_torch is None:
+            self.convert_current_image_mask_torch()
+            
+        if self.curr_image_torch is None:
+            print("Failed to convert image to torch format")
+            return
+            
+        # Only show masks for visible objects
+        visible_prob = self.curr_prob.clone()
+        for obj_id in range(1, self.num_objects + 1):
+            if obj_id not in self.visible_objects:
+                visible_prob[obj_id] = 0
+                
+        # Use visible_objects for basic visualization, vis_target_objects for popup/layer modes
+        target_objects = self.vis_target_objects if self.vis_mode in ['popup', 'layer'] else list(self.visible_objects)
+        
+        # Get visualization
         self.vis_image = get_visualization_torch(self.vis_mode, self.curr_image_torch,
-                                                 self.curr_prob, self.overlay_layer_torch,
-                                                 self.vis_target_objects)
+                                               visible_prob, self.overlay_layer_torch,
+                                               target_objects)
         self.curr_image_torch = None
         self.vis_image = np.ascontiguousarray(self.vis_image)
+        
+        # Save visualization if needed
         save_visualization = self.save_visualization_mode in [
             'Propagation only (higher quality)', 'Always'
         ]
         if save_visualization and not invalid_soft_mask:
             self.res_man.save_visualization(self.curr_ti, self.vis_mode, self.vis_image)
-        if self.save_soft_mask and not invalid_soft_mask:
-            self.res_man.save_soft_mask(self.curr_ti, self.curr_prob.cpu().numpy())
+            
+        # Update GUI
         self.gui.set_canvas(self.vis_image)
-
-    def show_current_frame(self, fast: bool = False, invalid_soft_mask: bool = False):
-        # Re-compute overlay and show the image
-        if fast:
-            self.update_current_image_fast(invalid_soft_mask)
-        else:
-            self.compose_current_im()
-            if self.save_visualization_mode == 'Always':
-                self.res_man.save_visualization(self.curr_ti, self.vis_mode, self.vis_image)
-            self.update_canvas()
 
         self.gui.update_slider(self.curr_ti)
         self.gui.frame_name.setText(self.res_man.names[self.curr_ti] + '.jpg')
@@ -250,24 +344,42 @@ class MainController():
         self.show_current_frame()
 
     def save_current_mask(self):
-        # save mask to hard disk
+        # Save inference masks in masks folder
         self.res_man.save_mask(self.curr_ti, self.curr_mask)
 
     def on_slider_update(self):
+        """Handle timeline slider updates"""
+        print(f"Slider update triggered: current value = {self.gui.tl_slider.value()}")
+        self.curr_ti = self.gui.tl_slider.value()
         # if we are propagating, the on_run function will take care of everything
         # don't do duplicate work here
-        self.curr_ti = self.gui.tl_slider.value()
-        if not self.propagating:
-            # with self.vis_cond:
-            #     self.vis_cond.notify()
-            if self.curr_frame_dirty:
-                self.save_current_mask()
+        if self.propagating:
+            print("Propagation in progress, ignoring slider update")
+            return
+            
+        new_ti = self.gui.tl_slider.value()
+        print(f"Updating to frame {new_ti}")
+        
+        # Save current frame if needed
+        if self.curr_frame_dirty:
+            print("Saving current frame")
+            self.save_current_mask()
             self.curr_frame_dirty = False
 
-            self.reset_this_interaction()
-            self.curr_ti = self.gui.tl_slider.value()
-            self.load_current_image_mask()
-            self.show_current_frame()
+        # Reset interaction state
+        self.reset_this_interaction()
+        
+        # Update current frame index
+        self.curr_ti = new_ti
+        
+        # Load and show new frame
+        print(f"Loading frame {self.curr_ti}")
+        self.load_current_image_mask()
+ 
+        self.convert_current_image_mask_torch()
+
+        self.show_current_frame()
+        
 
     def on_forward_propagation(self):
         if self.propagating:
@@ -312,10 +424,15 @@ class MainController():
         with autocast(self.device, enabled=(self.amp and self.device == 'cuda')):
             self.convert_current_image_mask_torch()
 
+            self.tracked_prob = self.curr_prob.clone()
+            for obj_id in range(1, self.num_objects + 1):
+                if obj_id not in self.tracked_objects:
+                    self.tracked_prob[obj_id] = 0
+
             self.gui.text(f'Propagation started at t={self.curr_ti}.')
             self.processor.clear_sensory_memory()
             self.curr_prob = self.processor.step(self.curr_image_torch,
-                                                 self.curr_prob[1:],
+                                                 self.tracked_prob[1:],
                                                  idx_mask=False)
             self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
             # clear
@@ -331,30 +448,39 @@ class MainController():
 
             dataset = PropagationReader(self.res_man, self.curr_ti, self.propagate_direction)
             loader = get_data_loader(dataset, self.cfg.num_read_workers)
-
+            print(f"Propagation loader: {len(loader)} frames")
+            i = 0
             # propagate till the end
             for data in loader:
+                i += 1
+                print(f"Propagation loop: {i}")
                 if not self.propagating:
                     break
                 self.curr_image_np, self.curr_image_torch = data
                 self.curr_image_torch = self.curr_image_torch.to(self.device, non_blocking=True)
-                self.propagate_fn()
+                self.propagate_fn()  # This updates self.curr_ti
 
                 self.curr_prob = self.processor.step(self.curr_image_torch)
                 self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
 
                 self.save_current_mask()
+                # Save soft masks for tracked objects
+                if self.save_soft_mask:
+                    for obj_id in range(1, self.num_objects + 1):
+                        if obj_id in self.tracked_objects:
+                            obj_mask = self.curr_prob[obj_id].cpu().numpy()
+                            self.res_man.save_soft_mask(self.curr_ti, obj_mask, obj_id)
                 self.show_current_frame(fast=True)
 
                 self.update_memory_gauges()
                 self.gui.process_events()
-
                 if self.curr_ti == 0 or self.curr_ti == self.T - 1:
                     break
 
+
             # stop the loop after one frame and clear memory
             self.propagating = False
-            self.on_clear_memory()
+            # self.on_clear_memory()
 
             self.curr_frame_dirty = False
             self.on_pause()
@@ -675,7 +801,12 @@ class MainController():
         self.save_visualization_mode = self.gui.save_visualization_combo.currentText()
 
     def on_save_soft_mask_toggle(self):
-        self.save_soft_mask = self.gui.save_soft_mask_checkbox.isChecked()
+        """Handle save soft mask checkbox toggle"""
+        if hasattr(self, 'gui'):
+            self.save_soft_mask = self.gui.save_soft_mask_checkbox.isChecked()
+            print(f"Save soft mask toggled: {self.save_soft_mask}")
+        else:
+            print("GUI not initialized yet")
 
     def on_mouse_motion_xy(self, x, y):
         self.last_ex = x
@@ -716,3 +847,23 @@ class MainController():
                 self.gui.text(f'Error exporting mask areas: {str(e)}')
         else:
             self.gui.text(f'No masks found in {mask_folder}')
+
+    def on_vis_checkbox_change(self, obj_id: int, state: int):
+        """Handle visibility checkbox state change"""
+        print(f"Visibility checkbox changed for object {obj_id}: {state == Qt.CheckState.Checked.value}")
+        if state == Qt.CheckState.Checked.value:
+            self.visible_objects.add(obj_id)
+        else:
+            self.visible_objects.discard(obj_id)
+        print(f"Visible objects: {self.visible_objects}")
+        self.show_current_frame()
+
+    def on_track_checkbox_change(self, obj_id: int, state: int):
+        """Handle tracking checkbox state change"""
+        print(f"Tracking checkbox changed for object {obj_id}: {state == Qt.CheckState.Checked.value}")
+        if state == Qt.CheckState.Checked.value:
+            self.tracked_objects.add(obj_id)
+        else:
+            self.tracked_objects.discard(obj_id)
+        print(f"Tracked objects: {self.tracked_objects}")
+        self.show_current_frame()
