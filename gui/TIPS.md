@@ -16,6 +16,10 @@ GUI Layout:
   - The 'manual' buttom will show tips 
   - console output
 - The bottom panel contains frame navigation and propagation controls
+- The left panel contains additional controls:
+  - Mask metrics export controls
+  - Pairwise metrics controls with checkboxes for different metric types
+  - Save soft mask toggle for tracking
 
 Controls:
 
@@ -30,6 +34,8 @@ Controls:
 Visualizations:
 
 - Middle-click on target objects to toggle some visualization effects (for layered, popout, RGBA, and binary mask export).
+- Soft masks are saved in the 'soft_masks' directory, with one subdirectory per object
+- Combined masks are saved in the 'all_masks' directory, containing all objects in a single mask
 - Soft masks are only saved for the "propagated" frames, not for the interacted frames. To save all frames, utilize forward and backward propagation.
 - For some visualizations (layered and RGBA), the images saved during propagation will be higher quality with soft edges. This is because we have access to the soft mask only during propagation. Set the save visualization mode to "Propagation only" to only save during propagation.
 - The "layered" visualization mode inserts an RGBA layer between the foreground and the background. Use "import layer" to select a new layer.
@@ -37,5 +43,11 @@ Visualizations:
 Exporting:
 
 - Exported binary/soft masks can be used in other applications like ProPainter. Note inpainting prefer over-segmentation over under-segmentation -- use a larger dilation radius if needed
+- Mask metrics can be exported to CSV format, including area, perimeter, circularity, and orientation metrics
+- Pairwise metrics can be exported to NPZ format, including:
+  - Distance between object centroids
+  - Overlap ratio between objects
+  - Contact length between objects
+- Use the checkboxes to select which pairwise metrics to calculate and save
 
 Issues and further documentation: hkchengrex/Cutie

@@ -1,9 +1,8 @@
 import os
 from os import path
 import logging
-from typing import Literal
+from pathlib import Path
 
-import cv2
 # fix conflicts between qt5 and cv2
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
 
@@ -14,7 +13,6 @@ except:
     print('torch.MPS not available.')
 from torch import autocast
 from torchvision.transforms.functional import to_tensor
-import numpy as np
 from omegaconf import DictConfig, open_dict
 from PySide6.QtCore import Qt
 
@@ -29,7 +27,7 @@ from gui.click_controller import ClickController
 from gui.reader import PropagationReader, get_data_loader
 from gui.exporter import convert_frames_to_video, convert_mask_to_binary
 from scripts.download_models import download_models_if_needed
-from mask_area import calculate_mask_areas
+from utils.mask_metrics import calculate_mask_metrics_batch, calculate_all_pairwise_metrics, save_pairwise_metrics
 
 log = logging.getLogger()
 
@@ -141,11 +139,29 @@ class MainController():
 
     def initialize_networks(self) -> None:
         download_models_if_needed()
+        print("\nInitializing CUTIE model...")
+        print(f"Loading weights from: {self.cfg.weights}")
+        print(f"Using device: {self.device}")
+        print(f"Model configuration:")
+        print(f"- Number of objects: {self.num_objects}")
+        print(f"- Using AMP: {self.amp}")
+        print(f"- Long term memory: {self.cfg.use_long_term}")
+        if self.cfg.use_long_term:
+            print(f"  - Max memory frames: {self.cfg.long_term.max_mem_frames}")
+            print(f"  - Min memory frames: {self.cfg.long_term.min_mem_frames}")
+            print(f"  - Number of prototypes: {self.cfg.long_term.num_prototypes}")
+        print(f"- Memory update frequency: {self.cfg.mem_every}")
+        print(f"- Top-k: {self.cfg.top_k}")
+        
         self.cutie = CUTIE(self.cfg).eval().to(self.device)
         model_weights = torch.load(self.cfg.weights, map_location=self.device)
         self.cutie.load_weights(model_weights)
+        print("Model loaded successfully!\n")
 
+        print("Initializing RITM model...")
+        print(f"Loading weights from: {self.cfg.ritm_weights}")
         self.click_ctrl = ClickController(self.cfg.ritm_weights, device=self.device)
+        print("RITM model loaded successfully!\n")
 
     def hit_number_key(self, number: int):
         if number == self.curr_object:
@@ -824,29 +840,74 @@ class MainController():
     def T(self) -> int:
         return self.res_man.T
 
-    def on_export_mask_areas(self):
-        output_filename = self.gui.mask_area_filename.text()
-        if not output_filename:
-            self.gui.text('Please enter an output filename')
-            return
+    def on_export_mask_metrics(self):
+        output_filename = self.gui.mask_metrics_filename.text()
         if not output_filename.endswith('.csv'):
             output_filename += '.csv'
-        mask_folder = path.join(self.cfg['workspace'], 'masks')
-        if path.exists(mask_folder):
-            self.gui.text(f'Exporting mask areas -- please wait')
-            self.gui.process_events()
-            try:
-                # Calculate areas with object names and number of objects
-                df = calculate_mask_areas(mask_folder, 
-                                        num_objects=self.num_objects,
-                                        object_names=self.name_objects)
-                # Save to CSV
-                df.to_csv(output_filename, index=False)
-                self.gui.text(f'Mask areas exported to {output_filename}')
-            except Exception as e:
-                self.gui.text(f'Error exporting mask areas: {str(e)}')
-        else:
-            self.gui.text(f'No masks found in {mask_folder}')
+            
+        print(f"\nExporting mask metrics to {output_filename}")
+        print(f"Number of objects: {self.num_objects}")
+        print(f"Object names: {self.name_objects}")
+            
+        mask_folder = Path(self.cfg['workspace']) / 'masks'
+        if not mask_folder.exists():
+            print(f"ERROR: Mask folder not found at {mask_folder}")
+            self.gui.text('No masks folder found. Please track some objects first.')
+            return
+            
+        print(f"Found mask folder at {mask_folder}")
+        mask_files = list(mask_folder.glob('*.png'))
+        print(f"Found {len(mask_files)} mask files")
+            
+        try:
+            print("\nCalculating mask metrics...")
+            df = calculate_mask_metrics_batch(mask_folder, self.num_objects, self.name_objects)
+            
+            if df.empty:
+                print("WARNING: No metrics were calculated - DataFrame is empty")
+                self.gui.text('No mask metrics were calculated. Please check if masks exist and contain valid objects.')
+                return
+                
+            print(f"\nWriting metrics to CSV file...")
+            print(f"DataFrame shape: {df.shape}")
+            print(f"Columns: {df.columns.tolist()}")
+            df.to_csv(output_filename, index=False)
+            print(f"Successfully wrote {len(df)} rows to {output_filename}")
+            self.gui.text(f'Successfully exported mask metrics to {output_filename}')
+        except Exception as e:
+            print(f"ERROR: Failed to export mask metrics: {str(e)}")
+            self.gui.text(f'Error exporting mask metrics: {str(e)}')
+
+    def on_save_pairwise_metrics(self):
+        """Handle saving pairwise metrics"""
+        # Get selected metrics
+        selected_metrics = []
+        if self.gui.distance_cb.isChecked():
+            selected_metrics.append('distance')
+        if self.gui.overlap_cb.isChecked():
+            selected_metrics.append('overlap_ratio')
+        if self.gui.contact_cb.isChecked():
+            selected_metrics.append('contact_length')
+            
+        if not selected_metrics:
+            self.gui.text("Please select at least one pairwise metric")
+            return
+            
+        # Get output filename
+        output_filename = "pairwise_metrics.npz"
+        
+        try:
+            # Calculate metrics
+            mask_folder = Path(self.cfg['workspace']) / 'masks'
+            metrics_dict = calculate_all_pairwise_metrics(str(mask_folder), self.num_objects)
+            
+            # Save metrics
+            output_path = Path(self.cfg['workspace']) / output_filename
+            save_pairwise_metrics(metrics_dict, str(output_path))
+            
+            self.gui.text(f'Successfully saved pairwise metrics to {output_filename}')
+        except Exception as e:
+            self.gui.text(f'Error saving pairwise metrics: {str(e)}')
 
     def on_vis_checkbox_change(self, obj_id: int, state: int):
         """Handle visibility checkbox state change"""

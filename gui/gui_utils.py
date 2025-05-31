@@ -43,4 +43,9 @@ def create_gauge(text: str):
 def apply_to_all_children_widget(layout, func):
     # deliberately non-recursive
     for i in range(layout.count()):
-        func(layout.itemAt(i).widget())
+        item = layout.itemAt(i)
+        if item.widget() is not None:
+            func(item.widget())
+        elif item.layout() is not None:
+            # Recursively apply to child layout
+            apply_to_all_children_widget(item.layout(), func)

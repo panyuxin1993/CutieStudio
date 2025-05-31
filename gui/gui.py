@@ -7,13 +7,15 @@ from omegaconf import DictConfig
 from PySide6.QtWidgets import (QWidget, QComboBox, QCheckBox, QHBoxLayout, QLabel, QPushButton,
                                QTextEdit, QSpinBox, QPlainTextEdit, QVBoxLayout, QSizePolicy,
                                QButtonGroup, QSlider, QRadioButton, QApplication, QFileDialog, QLineEdit,
-                               QFrame, QDialog)
+                               QFrame, QDialog, QGroupBox)
 
 from PySide6.QtGui import (QKeySequence, QShortcut, QTextCursor, QImage, QPixmap, QIcon)
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize, Signal, QThread, QEvent
 
 from cutie.utils.palette import davis_palette_np
 from gui.gui_utils import *
+from utils.mask_metrics import (calculate_mask_metrics_batch, calculate_all_pairwise_metrics, 
+                              save_pairwise_metrics, load_pairwise_metrics)
 
 
 class GUI(QWidget):
@@ -42,13 +44,13 @@ class GUI(QWidget):
         self.save_soft_mask_checkbox.setChecked(True)  # Default to saving soft masks
         self.save_soft_mask_checkbox.toggled.connect(controller.on_save_soft_mask_toggle)
 
-        # Add mask area export controls
-        self.mask_area_filename = QLineEdit()
-        self.mask_area_filename.setPlaceholderText("Enter output CSV filename")
-        self.mask_area_filename.setText(str(Path(cfg["workspace"]) / "mask_areas.csv"))
-        self.mask_area_filename.setMinimumWidth(200)
-        self.export_mask_areas_button = QPushButton('Export mask areas')
-        self.export_mask_areas_button.clicked.connect(controller.on_export_mask_areas)
+        # Export mask metrics
+        self.mask_metrics_filename = QLineEdit()
+        self.mask_metrics_filename.setPlaceholderText("Enter output CSV filename")
+        self.mask_metrics_filename.setText(str(Path(cfg["workspace"]) / "mask_metrics.csv"))
+        self.mask_metrics_filename.setMinimumWidth(200)
+        self.export_mask_metrics_button = QPushButton('Export Mask Metrics')
+        self.export_mask_metrics_button.clicked.connect(controller.on_export_mask_metrics)
 
         # set up some buttons
         self.play_button = QPushButton('Play video')
@@ -203,9 +205,8 @@ class GUI(QWidget):
         self.import_layer_button.clicked.connect(controller.on_import_layer)
 
         # Console on the GUI
-        self.console = QPlainTextEdit()
+        self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMinimumHeight(100)
         self.console.setMaximumHeight(100)
 
         # Tips for the users
@@ -265,12 +266,10 @@ class GUI(QWidget):
         overlay_botbox.addWidget(QLabel('Output bitrate (Mbps): '))
         overlay_botbox.addWidget(self.bitrate_dial)
         overlay_maskarea_box = QHBoxLayout()
-        overlay_maskarea_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        overlay_maskarea_box.addWidget(QLabel('Mask areas CSV:'))
-        overlay_maskarea_box.addWidget(self.mask_area_filename)
-        overlay_maskarea_box.addWidget(self.export_mask_areas_button)
+        overlay_maskarea_box.addWidget(self.mask_metrics_filename)
+        overlay_maskarea_box.addWidget(self.export_mask_metrics_button)
+        overlay_botbox.addLayout(overlay_maskarea_box)
         overlay_subbox.addLayout(overlay_botbox)
-        overlay_subbox.addLayout(overlay_maskarea_box)
         overlay_subbox.addLayout(overlay_topbox)
         navi.addLayout(overlay_subbox)
         apply_to_all_children_widget(overlay_topbox, apply_fixed_size_policy)
@@ -419,6 +418,42 @@ class GUI(QWidget):
 
         # Add console to left area
         left_area.addWidget(self.console)
+
+        # Add separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        left_area.addWidget(line)
+        
+        # Add pairwise metrics section
+        pairwise_label = QLabel("Pairwise Metrics")
+        pairwise_label.setStyleSheet("font-weight: bold;")
+        left_area.addWidget(pairwise_label)
+        
+        # Create checkboxes for pairwise metrics
+        self.pairwise_metrics_group = QGroupBox()
+        pairwise_layout = QVBoxLayout()
+        
+        self.distance_cb = QCheckBox("Distance between centroids")
+        self.overlap_cb = QCheckBox("Overlap ratio")
+        self.contact_cb = QCheckBox("Contact length")
+        
+        # Set all checkboxes checked by default
+        self.distance_cb.setChecked(True)
+        self.overlap_cb.setChecked(True)
+        self.contact_cb.setChecked(True)
+        
+        pairwise_layout.addWidget(self.distance_cb)
+        pairwise_layout.addWidget(self.overlap_cb)
+        pairwise_layout.addWidget(self.contact_cb)
+        
+        self.pairwise_metrics_group.setLayout(pairwise_layout)
+        left_area.addWidget(self.pairwise_metrics_group)
+        
+        # Add save button for pairwise metrics
+        self.save_pairwise_button = QPushButton("Save Pairwise Metrics")
+        self.save_pairwise_button.clicked.connect(self.on_save_pairwise_metrics)
+        left_area.addWidget(self.save_pairwise_button)
 
         # Drawing area main canvas
         draw_area = QHBoxLayout()
@@ -653,3 +688,7 @@ class GUI(QWidget):
         
         dialog.setLayout(layout)
         dialog.exec()
+
+    def on_save_pairwise_metrics(self):
+        """Delegate to controller to handle saving pairwise metrics"""
+        self.controller.on_save_pairwise_metrics()
