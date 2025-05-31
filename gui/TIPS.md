@@ -50,4 +50,13 @@ Exporting:
   - Contact length between objects
 - Use the checkboxes to select which pairwise metrics to calculate and save
 
-Issues and further documentation: hkchengrex/Cutie
+About:
+This project is a customized fork of Cutie (hkchengrex/Cutie) with additional features for mask analysis and visualization. 
+Major improvements include:
+- Enhanced mask metrics and analysis
+- Pairwise object metrics
+- Improved object visibility and tracking
+- Advanced mask visualization options
+- Extended export capabilities
+
+Original project: hkchengrex/Cutie

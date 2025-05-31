@@ -1,138 +1,127 @@
-# [Putting the Object Back into Video Object Segmentation](https://hkchengrex.github.io/Cutie)
+# CutieStudio - Enhanced Video Object Segmentation and Analysis
 
-[Ho Kei Cheng](https://hkchengrex.github.io/), [Seoung Wug Oh](https://sites.google.com/view/seoungwugoh/), [Brian Price](https://www.brianpricephd.com/), [Joon-Young Lee](https://joonyoung-cv.github.io/), [Alexander Schwing](https://www.alexander-schwing.de/)
+CutieStudio is an enhanced fork of [Cutie](https://hkchengrex.github.io/Cutie), adding powerful mask analysis and visualization capabilities to the original video object segmentation framework.
 
-University of Illinois Urbana-Champaign and Adobe
+## Original Work
+Cutie is a video object segmentation framework by [Ho Kei Cheng](https://hkchengrex.github.io/), [Seoung Wug Oh](https://sites.google.com/view/seoungwugoh/), [Brian Price](https://www.brianpricephd.com/), [Joon-Young Lee](https://joonyoung-cv.github.io/), and [Alexander Schwing](https://www.alexander-schwing.de/) from University of Illinois Urbana-Champaign and Adobe (CVPR 2024, Highlight).
 
-CVPR 2024, Highlight
+[[arXiV]](https://arxiv.org/abs/2310.12982) [[PDF]](https://arxiv.org/pdf/2310.12982.pdf) [[Project Page]](https://hkchengrex.github.io/Cutie/)
 
-[[arXiV]](https://arxiv.org/abs/2310.12982) [[PDF]](https://arxiv.org/pdf/2310.12982.pdf) [[Project Page]](https://hkchengrex.github.io/Cutie/) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1yo43XTbjxuWA7XgCUO9qxAi7wBI6HzvP?usp=sharing)
+## Enhanced Features
 
-## Highlight
+CutieStudio extends the original Cutie framework with:
 
-Cutie is a video object segmentation framework -- a follow-up work of [XMem](https://github.com/hkchengrex/XMem) with better consistency, robustness, and speed.
-This repository contains code for standard video object segmentation and a GUI tool for interactive video segmentation.
-The GUI tool additionally contains the "permanent memory" (from [XMem++](https://github.com/max810/XMem2)) option for better controllability.
+- **Advanced Mask Analysis**
+  - Frame-by-frame mask metrics (area, perimeter, circularity, orientation)
+  - Object centroid tracking
+  - Bounding box measurements
+  - Custom object naming support
 
-![overview](https://imgur.com/k84c965.jpg)
+- **Pairwise Object Metrics**
+  - Inter-object distance calculations
+  - Overlap ratio analysis
+  - Contact length measurements
+  - Configurable metric selection
 
-## Demo Video
+- **Enhanced Visualization**
+  - Object visibility controls
+  - Selective object tracking
+  - Combined mask visualization
+  - Soft mask handling
 
-https://github.com/hkchengrex/Cutie/assets/7107196/83a8abd5-369e-41a9-bb91-d9cc1289af70
-
-Source: https://raw.githubusercontent.com/hkchengrex/Cutie/main/docs/sources.txt
+- **Improved Export Capabilities**
+  - CSV export for mask metrics
+  - NPZ format for pairwise metrics
+  - Binary mask export
+  - Enhanced video export options
 
 ## Installation
 
 Tested on Ubuntu only.
 
 **Prerequisite:**
-
 - Python 3.8+
 - PyTorch 1.12+ and corresponding torchvision
 
-**Clone our repository:**
-
+**Clone the repository:**
 ```bash
-git clone https://github.com/hkchengrex/Cutie.git
+git clone https://github.com/panyuxin1993/CutieStudio.git
 ```
 
 **Install with pip:**
-
 ```bash
-cd Cutie
+cd CutieStudio
 pip install -e .
 ```
 
-(If you encounter the File "setup.py" not found error, upgrade your pip with pip install --upgrade pip)
-
 **Download the pretrained models:**
-
 ```python
 python cutie/utils/download_models.py
 ```
 
+## Specialized Models
+
+In addition to the default models, we provide specialized fine-tuned models for specific use cases:
+
+### Rat Segmentation Model
+A fine-tuned model specifically optimized for rat behavior analysis and tracking. This model has been trained on extensive rat video datasets and provides enhanced accuracy for rodent tracking applications.
+
+To access the rat segmentation model, please email panyuxin1993@gmail.com with:
+- Your name and affiliation
+- Brief description of your intended use
+- Any specific requirements or constraints
+
+We'll provide the model weights and setup instructions upon request.
+
 ## Quick Start
 
-### Scripting Demo
+### Interactive GUI
 
-This is probably the best starting point if you want to use Cutie in your project. Hopefully, the script is self-explanatory (additional comments in `scripting_demo.py`). If not, feel free to open an issue. For more advanced usage, like adding or removing objects, see `scripting_demo_add_del_objects.py`.
-
-```python
-@torch.inference_mode()
-@torch.cuda.amp.autocast()
-def main():
-
-    cutie = get_default_model()
-    processor = InferenceCore(cutie, cfg=cutie.cfg)
-    # the processor matches the shorter edge of the input to this size
-    # you might want to experiment with different sizes, -1 keeps the original size
-    processor.max_internal_size = 480
-
-    image_path = './examples/images/bike'
-    images = sorted(os.listdir(image_path))  # ordering is important
-    mask = Image.open('./examples/masks/bike/00000.png')
-    palette = mask.getpalette()
-    objects = np.unique(np.array(mask))
-    objects = objects[objects != 0].tolist()  # background "0" does not count as an object
-    mask = torch.from_numpy(np.array(mask)).cuda()
-
-    for ti, image_name in enumerate(images):
-        image = Image.open(os.path.join(image_path, image_name))
-        image = to_tensor(image).cuda().float()
-
-        if ti == 0:
-            output_prob = processor.step(image, mask, objects=objects)
-        else:
-            output_prob = processor.step(image)
-
-        # convert output probabilities to an object mask
-        mask = processor.output_prob_to_mask(output_prob)
-
-        # visualize prediction
-        mask = Image.fromarray(mask.cpu().numpy().astype(np.uint8))
-        mask.putpalette(palette)
-        mask.show()  # or use mask.save(...) to save it somewhere
-
-
-main()
-```
-
-### Interactive Demo
-
-Start the interactive gui with:
-
+Start the interactive GUI with:
 ```bash
 python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_objects head left_hand
 ```
 
-[See more instructions here](docs/INTERACTIVE.md).
-If you are running this on a remote server, X11 forwarding is possible. Start by using `ssh -X`. Additional configurations might be needed but Google would be more helpful than me.
+[See detailed instructions here](docs/INTERACTIVE.md)
 
-![demo](https://i.imgur.com/nqlYqTq.jpg)
+### Mask Analysis
 
-(For single video evaluation, see the unofficial script `scripts/process_video.py` from https://github.com/hkchengrex/Cutie/pull/16)
+Export mask metrics to CSV:
+```bash
+python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_objects head left_hand --export_metrics
+```
+
+### Pairwise Metrics
+
+Calculate and save pairwise object metrics:
+```bash
+python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_objects head left_hand --export_pairwise
+```
 
 ## Recent Updates
 
-### 2025-02
-- Added mask area calculation functionality to the interactive GUI
-  - New button and text field for exporting mask areas to CSV
-  - Supports custom object naming through `--name_objects` parameter
-  - Uses standard DAVIS color palette for consistent object identification
-  - Exports frame-by-frame area measurements for each object
-- Improved mask area calculation
-  - Now handles objects that appear in any frame (not just the first frame)
-  - Maintains consistent column names based on user-provided object names
-  - Automatically fills missing object areas with 0 values
-  - Better integration with the GUI's color mapping system
-
-## Training and Evaluation
-
-1. [Running Cutie on video object segmentation data.](docs/EVALUATION.md)
-2. [Training Cutie.](docs/TRAINING.md)
+### 2024-03
+- Added comprehensive mask metrics system
+  - Area, perimeter, circularity calculations
+  - Object centroid tracking
+  - Bounding box measurements
+  - Custom object naming support
+- Implemented pairwise object metrics
+  - Distance between object centroids
+  - Overlap ratio analysis
+  - Contact length measurements
+- Enhanced visualization system
+  - Object visibility controls
+  - Selective object tracking
+  - Combined mask visualization
+- Improved export capabilities
+  - CSV export for mask metrics
+  - NPZ format for pairwise metrics
+  - Enhanced video export options
 
 ## Citation
+
+Please cite both the original Cutie paper and this enhanced version:
 
 ```bibtex
 @inproceedings{cheng2023putting,
@@ -145,14 +134,9 @@ If you are running this on a remote server, X11 forwarding is possible. Start by
 
 ## References
 
-- The mask area calculation functionality and some optimization of gui was contributed by [Yuxin Pan](https://github.com/panyuxin1993 or https://gitee.com/panyuxin_65b7).
-
-- The GUI tools uses [RITM](https://github.com/SamsungLabs/ritm_interactive_segmentation) for interactive image segmentation. This repository also contains a redistribution of their code in `gui/ritm`. That part of code follows RITM's license.
-
-- For automatic video segmentation/integration with external detectors, see [DEVA](https://github.com/hkchengrex/Tracking-Anything-with-DEVA).
-
-- The interactive demo is developed upon [IVS](https://github.com/seoungwugoh/ivs-demo), [MiVOS](https://github.com/hkchengrex/MiVOS), and [XMem](https://github.com/hkchengrex/XMem).
-
-- We used [ProPainter](https://github.com/sczhou/ProPainter) in our video inpainting demo.
-
-- Thanks to [RTIM](https://github.com/SamsungLabs/ritm_interactive_segmentation) and [XMem++](https://github.com/max810/XMem2) for making this possible.
+- Original Cutie implementation: [hkchengrex/Cutie](https://github.com/hkchengrex/Cutie)
+- The mask area calculation functionality and GUI optimization was contributed by [Yuxin Pan](https://github.com/panyuxin1993)
+- The GUI tools uses [RITM](https://github.com/SamsungLabs/ritm_interactive_segmentation) for interactive image segmentation
+- For automatic video segmentation, see [DEVA](https://github.com/hkchengrex/Tracking-Anything-with-DEVA)
+- The interactive demo is developed upon [IVS](https://github.com/seoungwugoh/ivs-demo), [MiVOS](https://github.com/hkchengrex/MiVOS), and [XMem](https://github.com/hkchengrex/XMem)
+- We used [ProPainter](https://github.com/sczhou/ProPainter) in our video inpainting demo

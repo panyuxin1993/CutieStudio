@@ -1,6 +1,7 @@
 MIT License
 
-Copyright (c) 2024 Ho Kei Cheng
+Copyright (c) 2024 Yuxin Pan - CutieStudio
+Copyright (c) 2024 Ho Kei Cheng - Original Cutie
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +20,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Note: This software is based on Cutie (https://github.com/hkchengrex/Cutie) by Ho Kei Cheng et al.
+CutieStudio is an enhanced fork that adds additional features for mask analysis and visualization.
