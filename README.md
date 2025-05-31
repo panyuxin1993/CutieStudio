@@ -100,24 +100,6 @@ python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_
 
 ## Recent Updates
 
-### 2024-03
-- Added comprehensive mask metrics system
-  - Area, perimeter, circularity calculations
-  - Object centroid tracking
-  - Bounding box measurements
-  - Custom object naming support
-- Implemented pairwise object metrics
-  - Distance between object centroids
-  - Overlap ratio analysis
-  - Contact length measurements
-- Enhanced visualization system
-  - Object visibility controls
-  - Selective object tracking
-  - Combined mask visualization
-- Improved export capabilities
-  - CSV export for mask metrics
-  - NPZ format for pairwise metrics
-  - Enhanced video export options
 
 ## Citation
 
