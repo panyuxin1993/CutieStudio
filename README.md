@@ -84,19 +84,6 @@ python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_
 
 [See detailed instructions here](docs/INTERACTIVE.md)
 
-### Mask Analysis
-
-Export mask metrics to CSV:
-```bash
-python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_objects head left_hand --export_metrics
-```
-
-### Pairwise Metrics
-
-Calculate and save pairwise object metrics:
-```bash
-python interactive_gui.py --video ./examples/example.mp4 --num_objects 2 --name_objects head left_hand --export_pairwise
-```
 
 ## Recent Updates
 
