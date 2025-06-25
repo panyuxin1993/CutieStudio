@@ -2,6 +2,7 @@ import os
 from os import path
 import logging
 from pathlib import Path
+import time
 
 # fix conflicts between qt5 and cv2
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
@@ -72,6 +73,26 @@ class MainController():
         
         # Initialize save_soft_mask flag
         self.save_soft_mask = True
+        
+        # Performance monitoring
+        self.performance_stats = {
+            'frames_processed': 0,
+            'total_processing_time': 0.0,
+            'avg_fps': 0.0,
+            'last_frame_time': 0.0
+        }
+        
+        # Get performance settings from config
+        self.batch_save_soft_masks = cfg.get('performance', {}).get('batch_save_soft_masks', True)
+        self.enable_mask_cache = cfg.get('performance', {}).get('enable_mask_cache', True)
+        self.lazy_saving = cfg.get('performance', {}).get('lazy_saving', True)
+        self.save_only_tracked = cfg.get('performance', {}).get('save_only_tracked', True)
+        
+        print(f"Performance settings:")
+        print(f"  - Batch save soft masks: {self.batch_save_soft_masks}")
+        print(f"  - Enable mask cache: {self.enable_mask_cache}")
+        print(f"  - Lazy saving: {self.lazy_saving}")
+        print(f"  - Save only tracked: {self.save_only_tracked}")
         
         # Create GUI after initializing other components
         self.gui = GUI(self, self.cfg)
@@ -274,9 +295,14 @@ class MainController():
             raise
 
     def compose_current_im(self):
-        # Get combined mask from all_masks
+        # Get combined mask from all_masks or create from current probabilities
         combined_mask = self.res_man.get_all_masks(self.curr_ti)
-        if combined_mask is None:
+        if combined_mask is None and self.curr_prob is not None:
+            # Create combined mask directly from current probabilities
+            combined_mask = self.res_man.create_combined_mask_from_probabilities(
+                self.curr_ti, self.curr_prob, self.tracked_objects
+            )
+        elif combined_mask is None:
             # If no combined mask exists, create an empty mask
             combined_mask = np.zeros((self.h, self.w), dtype=np.uint8)
             
@@ -300,13 +326,19 @@ class MainController():
         if self.curr_prob is None:
             return
             
-        # Save soft masks for tracked objects
+        # Save soft masks for tracked objects using batch saving
         if self.save_soft_mask:
             print(f"Saving soft masks for tracked objects: {self.tracked_objects}")
+            # Prepare batch data
+            soft_masks = {}
             for obj_id in range(1, self.num_objects + 1):
                 if obj_id in self.tracked_objects:
                     obj_mask = self.curr_prob[obj_id].cpu().numpy()
-                    self.res_man.save_soft_mask(self.curr_ti, obj_mask, obj_id)
+                    soft_masks[obj_id] = obj_mask
+            
+            # Use batch saving for better performance
+            if soft_masks:
+                self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects)
                     
         # Update visualization
         self.show_current_frame()
@@ -472,6 +504,10 @@ class MainController():
                 print(f"Propagation loop: {i}")
                 if not self.propagating:
                     break
+                    
+                # Start timing
+                frame_start_time = time.time()
+                
                 self.curr_image_np, self.curr_image_torch = data
                 self.curr_image_torch = self.curr_image_torch.to(self.device, non_blocking=True)
                 self.propagate_fn()  # This updates self.curr_ti
@@ -480,13 +516,23 @@ class MainController():
                 self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
 
                 self.save_current_mask()
-                # Save soft masks for tracked objects
+                # Save soft masks for tracked objects using batch saving
                 if self.save_soft_mask:
+                    # Prepare batch data for all tracked objects
+                    soft_masks = {}
                     for obj_id in range(1, self.num_objects + 1):
                         if obj_id in self.tracked_objects:
                             obj_mask = self.curr_prob[obj_id].cpu().numpy()
-                            self.res_man.save_soft_mask(self.curr_ti, obj_mask, obj_id)
+                            soft_masks[obj_id] = obj_mask
+                    
+                    # Use batch saving for better performance
+                    if soft_masks:
+                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects)
                 self.show_current_frame(fast=True)
+
+                # Update performance stats
+                frame_time = time.time() - frame_start_time
+                self.update_performance_stats(frame_time)
 
                 self.update_memory_gauges()
                 self.gui.process_events()
@@ -541,6 +587,18 @@ class MainController():
                 self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
 
                 self.save_current_mask()
+                # Save soft masks for tracked objects using batch saving
+                if self.save_soft_mask:
+                    # Prepare batch data for all tracked objects
+                    soft_masks = {}
+                    for obj_id in range(1, self.num_objects + 1):
+                        if obj_id in self.tracked_objects:
+                            obj_mask = self.curr_prob[obj_id].cpu().numpy()
+                            soft_masks[obj_id] = obj_mask
+                    
+                    # Use batch saving for better performance
+                    if soft_masks:
+                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects)
                 self.show_current_frame(fast=True)
 
                 self.update_memory_gauges()
@@ -758,6 +816,8 @@ class MainController():
             torch.cuda.empty_cache()
         elif 'mps' in self.device:
             mps.empty_cache()
+        # Clear mask cache to free memory
+        self.res_man.clear_cache()
         self.processor.update_config(self.cfg)
         self.update_gpu_gauges()
         self.update_memory_gauges()
@@ -768,6 +828,8 @@ class MainController():
             torch.cuda.empty_cache()
         elif 'mps' in self.device:
             mps.empty_cache()
+        # Clear mask cache to free memory
+        self.res_man.clear_cache()
         self.processor.update_config(self.cfg)
         self.update_gpu_gauges()
         self.update_memory_gauges()
@@ -928,3 +990,27 @@ class MainController():
             self.tracked_objects.discard(obj_id)
         print(f"Tracked objects: {self.tracked_objects}")
         self.show_current_frame()
+
+    def clear_mask_cache(self):
+        """Clear mask cache to free memory"""
+        self.res_man.clear_cache()
+        self.gui.text("Mask cache cleared to free memory.")
+
+    def update_performance_stats(self, frame_time: float = None):
+        """Update performance statistics"""
+        if frame_time is None:
+            frame_time = time.time() - self.performance_stats['last_frame_time']
+        
+        self.performance_stats['frames_processed'] += 1
+        self.performance_stats['total_processing_time'] += frame_time
+        self.performance_stats['avg_fps'] = self.performance_stats['frames_processed'] / self.performance_stats['total_processing_time']
+        self.performance_stats['last_frame_time'] = time.time()
+        
+        # Update GUI with performance info
+        if hasattr(self, 'gui') and self.performance_stats['frames_processed'] % 10 == 0:
+            fps = self.performance_stats['avg_fps']
+            self.gui.text(f"Performance: {fps:.1f} FPS, {self.performance_stats['frames_processed']} frames processed")
+
+    def get_performance_stats(self) -> dict:
+        """Get current performance statistics"""
+        return self.performance_stats.copy()

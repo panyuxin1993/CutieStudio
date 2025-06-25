@@ -12,7 +12,10 @@ GUI Layout:
   - Object list shows all objects with their IDs, names, and control checkboxes
   - "Show" checkbox controls whether an object's mask is visible in the main canvas
   - "Track" checkbox controls whether an object is included in propagation
-  - Memory gauges and controls are below the object list
+  - Memory gauges and controls are below the object list:
+    - "Reset all memory" clears both permanent and temporary memory
+    - "Reset non-permanent memory" clears only temporary memory
+    - "Clear mask cache" frees memory by clearing cached mask data
   - The 'manual' buttom will show tips 
   - console output
 - The bottom panel contains frame navigation and propagation controls
@@ -30,6 +33,12 @@ Controls:
 - Use C to commit a frame to permanent memory.
 - Memory can be corrupted by bad segmentations. Make good use of "reset memory" and do not commit bad segmentations.
 - "Export as video" only aggregates visualizations that are saved on disks. You need to check "save overlay" for that to happen.
+
+Memory Management:
+
+- "Reset all memory" completely clears the model's memory, including permanent memory. Use this when you want to start fresh.
+- "Reset non-permanent memory" clears temporary memory while preserving permanent memory. Use this to free up memory without losing committed frames.
+- "Clear mask cache" removes cached mask data from memory to free up RAM. This is useful for long videos or when working with limited memory. The cache will be rebuilt as needed when you navigate to frames.
 
 Visualizations:
 

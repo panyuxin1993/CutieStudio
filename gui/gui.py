@@ -174,6 +174,8 @@ class GUI(QWidget):
         self.clear_all_mem_button.clicked.connect(controller.on_clear_memory)
         self.clear_non_perm_mem_button = QPushButton('Reset non-permanent memory')
         self.clear_non_perm_mem_button.clicked.connect(controller.on_clear_non_permanent_memory)
+        self.clear_mask_cache_button = QPushButton('Clear mask cache')
+        self.clear_mask_cache_button.clicked.connect(controller.clear_mask_cache)
 
         # displaying memory usage
         self.perm_mem_gauge, self.perm_mem_gauge_layout = create_gauge('Permanent memory size')
@@ -398,6 +400,7 @@ class GUI(QWidget):
         left_area.addLayout(self.torch_mem_gauge_layout)
         left_area.addWidget(self.clear_all_mem_button)
         left_area.addWidget(self.clear_non_perm_mem_button)
+        left_area.addWidget(self.clear_mask_cache_button)
         left_area.addLayout(self.work_mem_min_layout)
         left_area.addLayout(self.work_mem_max_layout)
         left_area.addLayout(self.long_mem_max_layout)

@@ -53,3 +53,16 @@ long_term:
 
 save_aux: False
 flip_aug: False
+
+# Performance optimization settings
+performance:
+  # Enable batch saving for soft masks (significantly improves performance for multiple objects)
+  batch_save_soft_masks: True
+  # Enable in-memory mask caching
+  enable_mask_cache: True
+  # Maximum number of frames to cache in memory
+  max_cache_size: 50
+  # Enable lazy saving (only save when necessary)
+  lazy_saving: True
+  # Save soft masks only for tracked objects
+  save_only_tracked: True

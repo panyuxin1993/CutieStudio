@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from queue import Queue
 from threading import Thread
 from omegaconf import DictConfig, open_dict
-from typing import Dict, Optional, Tuple, Literal, Union
+from typing import Dict, Optional, Tuple, Literal, Union, List
 import cv2
 from PIL import Image
 if not hasattr(Image, 'Resampling'):  # Pillow<9.0
@@ -46,8 +46,8 @@ class LRU:
 
 @dataclass
 class SaveItem:
-    type: Literal['mask', 'visualization', 'soft_mask']
-    data: Union[Image.Image, np.ndarray]
+    type: Literal['mask', 'visualization', 'soft_mask', 'batch_soft_mask']
+    data: Union[Image.Image, np.ndarray, Dict]
     name: str = None  # only used for soft_mask
 
 
@@ -137,12 +137,34 @@ class ResourceManager:
             t.daemon = True
             t.start()
 
+        # Performance optimization: In-memory mask cache
+        self.mask_cache = {}  # Cache for combined masks
+        self.soft_mask_cache = {}  # Cache for individual soft masks
+        
+        # Get performance settings from config
+        self.batch_save_soft_masks = cfg.get('performance', {}).get('batch_save_soft_masks', True)
+        self.enable_mask_cache = cfg.get('performance', {}).get('enable_mask_cache', True)
+        self.cache_size_limit = cfg.get('performance', {}).get('max_cache_size', 50)
+        self.lazy_saving = cfg.get('performance', {}).get('lazy_saving', True)
+        self.save_only_tracked = cfg.get('performance', {}).get('save_only_tracked', True)
+        
+        # Disable cache if not enabled
+        if not self.enable_mask_cache:
+            self.mask_cache = None
+            self.soft_mask_cache = None
+
     def __del__(self):
-        for _ in range(self.num_save_threads):
-            self.save_queue.put(None)
-        self.save_queue.join()
-        for t in self.save_threads:
-            t.join()
+        # Check if attributes exist before trying to access them
+        if hasattr(self, 'num_save_threads') and hasattr(self, 'save_queue') and hasattr(self, 'save_threads'):
+            try:
+                for _ in range(self.num_save_threads):
+                    self.save_queue.put(None)
+                self.save_queue.join()
+                for t in self.save_threads:
+                    t.join()
+            except Exception as e:
+                # Ignore errors during cleanup
+                pass
 
     def save_thread(self, queue: Queue):
         while True:
@@ -177,9 +199,76 @@ class ResourceManager:
                     save_path = path.join(self.soft_mask_dir, f'{i}', args.name + '.png')
                     print(f"Saving to {save_path}")
                     cv2.imwrite(save_path, data)
+            elif args.type == 'batch_soft_mask':
+                # Optimized batch saving of soft masks
+                self._save_batch_soft_masks(args.data, args.name)
             else:
                 raise NotImplementedError
             queue.task_done()
+
+    def _save_batch_soft_masks(self, batch_data: Dict, frame_name: str):
+        """Optimized batch saving of soft masks"""
+        try:
+            frame_idx = batch_data.get('frame_idx')
+            soft_masks = batch_data.get('soft_masks', {})  # {obj_id: mask_array}
+            tracked_objects = batch_data.get('tracked_objects', set())
+            
+            # Save individual soft masks for tracked objects
+            for obj_id, mask_array in soft_masks.items():
+                # Only save if object is tracked or if save_only_tracked is False
+                if not self.save_only_tracked or obj_id in tracked_objects:
+                    save_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
+                    cv2.imwrite(save_path, binary_mask)
+            
+            # Create combined mask in memory and save
+            if soft_masks:
+                # Get dimensions from first mask
+                first_mask = next(iter(soft_masks.values()))
+                h, w = first_mask.shape
+                combined_mask = np.zeros((h, w), dtype=np.uint8)
+                
+                # Combine all masks
+                for obj_id, mask_array in soft_masks.items():
+                    # Only include tracked objects in combined mask
+                    if obj_id in tracked_objects:
+                        binary_mask = (mask_array > 0.5).astype(np.uint8)
+                        combined_mask[binary_mask > 0] = obj_id
+                
+                # Save combined mask
+                mask_img = Image.fromarray(combined_mask, mode='P')
+                mask_img.putpalette(self.palette)
+                mask_img.save(os.path.join(self.all_masks_dir, f'{frame_idx:07d}.png'))
+                
+                # Cache the combined mask if enabled
+                if self.enable_mask_cache and self.mask_cache is not None:
+                    self.mask_cache[frame_idx] = combined_mask.copy()
+                    
+                    # Clean up cache if too large
+                    if len(self.mask_cache) > self.cache_size_limit:
+                        oldest_key = min(self.mask_cache.keys())
+                        del self.mask_cache[oldest_key]
+        except Exception as e:
+            print(f"Error in batch soft mask saving: {str(e)}")
+            # Fall back to individual saving if batch saving fails
+            self._fallback_individual_saving(batch_data)
+
+    def _fallback_individual_saving(self, batch_data: Dict):
+        """Fallback method for individual soft mask saving if batch saving fails"""
+        try:
+            frame_idx = batch_data.get('frame_idx')
+            soft_masks = batch_data.get('soft_masks', {})
+            tracked_objects = batch_data.get('tracked_objects', set())
+            
+            for obj_id, mask_array in soft_masks.items():
+                if obj_id in tracked_objects:
+                    save_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
+                    cv2.imwrite(save_path, binary_mask)
+        except Exception as e:
+            print(f"Error in fallback individual saving: {str(e)}")
 
     def _extract_frames(self, video: str):
         cap = cv2.VideoCapture(video)
@@ -282,6 +371,15 @@ class ResourceManager:
         print(f"Updating all_masks for frame {ti}")
         self.update_all_masks(ti)
 
+    def save_batch_soft_masks(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set):
+        """Optimized batch saving of soft masks"""
+        batch_data = {
+            'frame_idx': ti,
+            'soft_masks': soft_masks,
+            'tracked_objects': tracked_objects
+        }
+        self.add_to_queue_with_warning(SaveItem('batch_soft_mask', batch_data, self.names[ti]))
+
     def update_all_masks(self, ti: int):
         """Combine all available masks from soft_masks into a single mask in all_masks"""
         print(f"Updating all_masks for frame {ti}")
@@ -325,12 +423,55 @@ class ResourceManager:
         print(f"Saved combined mask to {os.path.join(self.all_masks_dir, f'{ti:07d}.png')}")
 
     def get_all_masks(self, ti: int) -> np.ndarray:
-        """Get the combined mask from all_masks directory"""
+        """Get the combined mask from all_masks directory or cache"""
+        # Check cache first if enabled
+        if self.enable_mask_cache and self.mask_cache is not None and ti in self.mask_cache:
+            return self.mask_cache[ti]
+            
+        # Load from disk if not in cache
         mask_path = os.path.join(self.all_masks_dir, f'{ti:07d}.png')
         if os.path.exists(mask_path):
             mask = Image.open(mask_path)
-            return np.array(mask)
+            mask_array = np.array(mask)
+            # Cache the result if enabled
+            if self.enable_mask_cache and self.mask_cache is not None:
+                self.mask_cache[ti] = mask_array
+                
+                # Clean up cache if too large
+                if len(self.mask_cache) > self.cache_size_limit:
+                    oldest_key = min(self.mask_cache.keys())
+                    del self.mask_cache[oldest_key]
+                    
+            return mask_array
         return None
+
+    def create_combined_mask_from_probabilities(self, ti: int, prob: np.ndarray, tracked_objects: set) -> np.ndarray:
+        """Create combined mask directly from probability tensor without I/O"""
+        if prob is None:
+            return np.zeros((self.height, self.width), dtype=np.uint8)
+            
+        # Convert probability tensor to numpy
+        prob_np = prob.cpu().numpy() if hasattr(prob, 'cpu') else prob
+        
+        # Create combined mask
+        combined_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        
+        # Add each tracked object to the combined mask
+        for obj_id in range(1, prob_np.shape[0]):
+            if obj_id in tracked_objects:
+                obj_mask = (prob_np[obj_id] > 0.5).astype(np.uint8)
+                combined_mask[obj_mask > 0] = obj_id
+        
+        # Cache the result if enabled
+        if self.enable_mask_cache and self.mask_cache is not None:
+            self.mask_cache[ti] = combined_mask.copy()
+            
+            # Clean up cache if too large
+            if len(self.mask_cache) > self.cache_size_limit:
+                oldest_key = min(self.mask_cache.keys())
+                del self.mask_cache[oldest_key]
+                
+        return combined_mask
 
     def _get_image_unbuffered(self, ti: int):
         # returns H*W*3 uint8 array
@@ -391,6 +532,12 @@ class ResourceManager:
     def invalidate(self, ti: int):
         # the image buffer is never invalidated
         self.get_mask.invalidate((ti, ))
+        # Also invalidate cached masks if cache is enabled
+        if self.enable_mask_cache:
+            if self.mask_cache is not None and ti in self.mask_cache:
+                del self.mask_cache[ti]
+            if self.soft_mask_cache is not None and ti in self.soft_mask_cache:
+                del self.soft_mask_cache[ti]
 
     def __len__(self):
         return self.length
@@ -406,3 +553,12 @@ class ResourceManager:
     @property
     def w(self) -> int:
         return self.width
+
+    def clear_cache(self):
+        """Clear all cached masks to free memory"""
+        if self.enable_mask_cache:
+            if self.mask_cache is not None:
+                self.mask_cache.clear()
+            if self.soft_mask_cache is not None:
+                self.soft_mask_cache.clear()
+            print("Mask cache cleared")
