@@ -212,29 +212,41 @@ class ResourceManager:
             frame_idx = batch_data.get('frame_idx')
             soft_masks = batch_data.get('soft_masks', {})  # {obj_id: mask_array}
             tracked_objects = batch_data.get('tracked_objects', set())
+            save_all_visible = batch_data.get('save_all_visible', True)  # Default to True for backward compatibility
             
-            # Save individual soft masks for tracked objects
+            # Save individual soft masks for tracked objects only
             for obj_id, mask_array in soft_masks.items():
-                # Only save if object is tracked or if save_only_tracked is False
-                if not self.save_only_tracked or obj_id in tracked_objects:
+                # Only save if object is tracked
+                if obj_id in tracked_objects:
                     save_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
                     binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
                     cv2.imwrite(save_path, binary_mask)
             
-            # Create combined mask in memory and save
+            # Create combined mask that includes all visible objects from existing soft masks
             if soft_masks:
                 # Get dimensions from first mask
                 first_mask = next(iter(soft_masks.values()))
                 h, w = first_mask.shape
                 combined_mask = np.zeros((h, w), dtype=np.uint8)
                 
-                # Combine all masks
+                # First, add tracked objects from current probabilities
                 for obj_id, mask_array in soft_masks.items():
-                    # Only include tracked objects in combined mask
                     if obj_id in tracked_objects:
                         binary_mask = (mask_array > 0.5).astype(np.uint8)
                         combined_mask[binary_mask > 0] = obj_id
+                
+                # Then, add existing soft masks for untracked objects if save_all_visible is enabled
+                if save_all_visible:
+                    for obj_id in range(1, 100):  # Check reasonable range of object IDs
+                        if obj_id not in tracked_objects:  # Only for untracked objects
+                            existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
+                            if os.path.exists(existing_mask_path):
+                                existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
+                                if existing_mask is not None:
+                                    # Add existing mask to combined mask
+                                    binary_mask = (existing_mask > 127).astype(np.uint8)
+                                    combined_mask[binary_mask > 0] = obj_id
                 
                 # Save combined mask
                 mask_img = Image.fromarray(combined_mask, mode='P')
@@ -371,12 +383,13 @@ class ResourceManager:
         print(f"Updating all_masks for frame {ti}")
         self.update_all_masks(ti)
 
-    def save_batch_soft_masks(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set):
+    def save_batch_soft_masks(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set, save_all_visible: bool = True):
         """Optimized batch saving of soft masks"""
         batch_data = {
             'frame_idx': ti,
             'soft_masks': soft_masks,
-            'tracked_objects': tracked_objects
+            'tracked_objects': tracked_objects,
+            'save_all_visible': save_all_visible
         }
         self.add_to_queue_with_warning(SaveItem('batch_soft_mask', batch_data, self.names[ti]))
 
@@ -445,22 +458,52 @@ class ResourceManager:
             return mask_array
         return None
 
-    def create_combined_mask_from_probabilities(self, ti: int, prob: np.ndarray, tracked_objects: set) -> np.ndarray:
+    def create_combined_mask_from_probabilities(self, ti: int, prob: np.ndarray, tracked_objects: set, save_all_visible: bool = True) -> np.ndarray:
         """Create combined mask directly from probability tensor without I/O"""
         if prob is None:
+            print(f"Warning: No probabilities provided for frame {ti}")
             return np.zeros((self.height, self.width), dtype=np.uint8)
             
         # Convert probability tensor to numpy
         prob_np = prob.cpu().numpy() if hasattr(prob, 'cpu') else prob
+        print(f"Creating combined mask for frame {ti}, prob shape: {prob_np.shape}, tracked objects: {tracked_objects}")
         
         # Create combined mask
         combined_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         
-        # Add each tracked object to the combined mask
+        # First, add tracked objects from current probabilities (PRIORITY 1)
+        tracked_objects_added_from_prob = 0
         for obj_id in range(1, prob_np.shape[0]):
             if obj_id in tracked_objects:
                 obj_mask = (prob_np[obj_id] > 0.5).astype(np.uint8)
-                combined_mask[obj_mask > 0] = obj_id
+                if np.any(obj_mask > 0):
+                    combined_mask[obj_mask > 0] = obj_id
+                    print(f"Added tracked object {obj_id} from current probabilities for frame {ti} (pixels: {np.sum(obj_mask > 0)})")
+                    tracked_objects_added_from_prob += 1
+                else:
+                    print(f"Tracked object {obj_id} has no pixels above threshold in current probabilities for frame {ti}")
+        
+        print(f"Added {tracked_objects_added_from_prob} tracked objects from current probabilities for frame {ti}")
+        
+        # Then, add existing soft masks for untracked objects if save_all_visible is enabled (PRIORITY 2)
+        untracked_objects_added = 0
+        if save_all_visible:
+            for obj_id in range(1, 100):  # Check reasonable range of object IDs
+                if obj_id not in tracked_objects:  # Only for untracked objects
+                    existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{ti:07d}.png')
+                    if os.path.exists(existing_mask_path):
+                        existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
+                        if existing_mask is not None:
+                            # Add existing mask to combined mask
+                            binary_mask = (existing_mask > 127).astype(np.uint8)
+                            if np.any(binary_mask > 0):
+                                combined_mask[binary_mask > 0] = obj_id
+                                print(f"Added existing soft mask for untracked object {obj_id} to combined mask for frame {ti} (pixels: {np.sum(binary_mask > 0)})")
+                                untracked_objects_added += 1
+            
+            print(f"Added {untracked_objects_added} untracked objects with existing masks to combined mask for frame {ti}")
+        
+        print(f"Final combined mask for frame {ti}: shape {combined_mask.shape}, max value {combined_mask.max()}, total non-zero pixels {np.sum(combined_mask > 0)}")
         
         # Cache the result if enabled
         if self.enable_mask_cache and self.mask_cache is not None:

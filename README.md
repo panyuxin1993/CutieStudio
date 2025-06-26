@@ -28,12 +28,15 @@ CutieStudio extends the original Cutie framework with:
   - Selective object tracking
   - Combined mask visualization
   - Soft mask handling
+  - Save all visible objects option (new feature)
+  - Logical checkbox relationships (Track automatically enables Show, Show disables Track)
 
 - **Improved Export Capabilities**
   - CSV export for mask metrics
   - NPZ format for pairwise metrics
   - Binary mask export
   - Enhanced video export options
+  - Combined masks with all visible objects
 
 - **Performance Optimizations**
   - Batch soft mask saving (5-7x speedup for 10+ objects)
@@ -113,8 +116,28 @@ performance:
   enable_mask_cache: True        # Enable caching (recommended)
   max_cache_size: 50            # Cache size limit
   lazy_saving: True             # Only save when necessary
-  save_only_tracked: True       # Only save tracked objects
+  save_all_visible: True        # Save all visible objects (new feature)
+  save_only_tracked: False      # Legacy option (use save_all_visible instead)
 ```
+
+### Save All Visible Objects Feature
+
+CutieStudio now supports including all visible objects in combined masks, while preserving existing soft masks for untracked objects. This feature allows you to:
+
+- **Visualize objects without tracking them**: Include all visible objects in combined masks for comprehensive analysis
+- **Preserve existing data**: Soft masks are only saved for tracked objects to prevent overwriting existing soft masks for untracked objects
+- **Flexible object management**: Control which objects are included in combined masks independently of tracking status
+
+**Usage:**
+- Enable "Include all visible objects in combined masks" checkbox in the GUI (default: enabled)
+- Objects with "Show" checkbox enabled will be included in combined masks
+- Objects with "Track" checkbox enabled will be included in propagation and have their soft masks saved
+- Combined masks in `all_masks/` will include tracked objects from current probabilities plus existing soft masks for untracked objects
+
+**Configuration:**
+- Set `save_all_visible: True` to include all visible objects in combined masks (default)
+- Set `save_all_visible: False` to include only tracked objects in combined masks
+- Soft masks are always saved only for tracked objects to preserve existing data
 
 ### Performance Testing
 
@@ -135,6 +158,17 @@ See [PERFORMANCE_OPTIMIZATION.md](PERFORMANCE_OPTIMIZATION.md) for detailed tech
 
 ## Recent Updates
 
+- **Fixed Reset Buttons**: Reset frame and Reset object buttons now work properly with immediate visual feedback
+- **Fixed Reset Object Colors**: Reset object button now properly remaps remaining object IDs to maintain color consistency
+- **Fixed Reset Buttons**: Reset frame and Reset object buttons now properly clear masks from disk and update combined masks
+- **Fixed Propagation Logic**: Tracked objects from current probabilities are now shown first during propagation, not existing soft masks
+- **Logical Checkbox Relationships**: Added automatic checkbox state management - when "Track" is checked, "Show" is automatically checked; when "Show" is unchecked, "Track" is automatically unchecked
+- **Include All Visible Objects in Combined Masks**: New feature to include all visible objects in combined masks while preserving existing soft masks for untracked objects
+- **Real-time Tracking Visibility**: Fixed issue where only tracked objects were visible during propagation - now all visible objects are shown in real-time
+- **Real-time Visualization Fix**: Fixed issue where masks weren't visible during propagation when tracking all objects with no previous results
+- **Mixed Soft Masks Fix**: Fixed issue where only objects with existing soft masks were visible during propagation when some objects had soft masks and others didn't
+- Enhanced GUI controls for flexible object management
+- Improved combined mask generation that preserves existing data
 
 ## Citation
 

@@ -44,6 +44,11 @@ class GUI(QWidget):
         self.save_soft_mask_checkbox.setChecked(True)  # Default to saving soft masks
         self.save_soft_mask_checkbox.toggled.connect(controller.on_save_soft_mask_toggle)
 
+        # Add checkbox for saving all visible objects
+        self.save_all_visible_checkbox = QCheckBox(self)
+        self.save_all_visible_checkbox.setChecked(cfg.get('performance', {}).get('save_all_visible', True))
+        self.save_all_visible_checkbox.toggled.connect(controller.on_save_all_visible_toggle)
+
         # Export mask metrics
         self.mask_metrics_filename = QLineEdit()
         self.mask_metrics_filename.setPlaceholderText("Enter output CSV filename")
@@ -259,6 +264,8 @@ class GUI(QWidget):
         overlay_topbox.addWidget(self.combo)
         overlay_topbox.addWidget(QLabel('Save soft mask during propagation'))
         overlay_topbox.addWidget(self.save_soft_mask_checkbox)
+        overlay_topbox.addWidget(QLabel('Include all visible objects in combined masks'))
+        overlay_topbox.addWidget(self.save_all_visible_checkbox)
         overlay_topbox.addWidget(self.export_binary_button)
         overlay_botbox.addWidget(QLabel('Save visualization'))
         overlay_botbox.addWidget(self.save_visualization_combo)
@@ -355,7 +362,7 @@ class GUI(QWidget):
             r, g, b = davis_palette_np[obj_id]
             rgb = f'rgb({r},{g},{b})'
             color_label = QLabel()
-            color_label.setStyleSheet('QLabel {background: ' + rgb + ';}')
+            color_label.setStyleSheet('QLabel {background: ' + rgb + '; color: white; font-weight: bold; border: 1px solid #666;}')
             color_label.setText(f'{self.name_objects[obj_id-1]}')
             color_label.setMinimumWidth(100)
             color_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -663,7 +670,7 @@ class GUI(QWidget):
     def set_object_color(self, object_id: int):
         r, g, b = davis_palette_np[object_id]
         rgb = f'rgb({r},{g},{b})'
-        self.object_color.setStyleSheet('QLabel {background: ' + rgb + ';}')
+        self.object_color.setStyleSheet('QLabel {background: ' + rgb + '; color: white; font-weight: bold; border: 1px solid #666;}')
         self.object_color.setText(f'{self.name_objects[object_id-1]}')
 
     def progressbar_update(self, progress: float):

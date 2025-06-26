@@ -3,6 +3,8 @@ from os import path
 import logging
 from pathlib import Path
 import time
+import cv2
+from PIL import Image
 
 # fix conflicts between qt5 and cv2
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
@@ -87,12 +89,14 @@ class MainController():
         self.enable_mask_cache = cfg.get('performance', {}).get('enable_mask_cache', True)
         self.lazy_saving = cfg.get('performance', {}).get('lazy_saving', True)
         self.save_only_tracked = cfg.get('performance', {}).get('save_only_tracked', True)
+        self.save_all_visible = cfg.get('performance', {}).get('save_all_visible', True)
         
         print(f"Performance settings:")
         print(f"  - Batch save soft masks: {self.batch_save_soft_masks}")
         print(f"  - Enable mask cache: {self.enable_mask_cache}")
         print(f"  - Lazy saving: {self.lazy_saving}")
-        print(f"  - Save only tracked: {self.save_only_tracked}")
+        print(f"  - Save all visible objects: {self.save_all_visible}")
+        print(f"  - Save only tracked objects: {self.save_only_tracked}")
         
         # Create GUI after initializing other components
         self.gui = GUI(self, self.cfg)
@@ -152,6 +156,9 @@ class MainController():
         self.gui.show()
         self.gui.text('Initialized.')
         self.initialized = True
+
+        # Update checkbox states to reflect logical relationship
+        self.update_checkbox_states()
 
         # try to load the default overlay
         self._try_load_layer('./docs/uiuc.png')
@@ -295,22 +302,32 @@ class MainController():
             raise
 
     def compose_current_im(self):
-        # Get combined mask from all_masks or create from current probabilities
-        combined_mask = self.res_man.get_all_masks(self.curr_ti)
-        if combined_mask is None and self.curr_prob is not None:
-            # Create combined mask directly from current probabilities
+        # Prioritize current in-memory probabilities over disk-based combined masks
+        if self.curr_prob is not None:
+            # Create combined mask from current probabilities first
+            print(f"Creating combined mask for frame {self.curr_ti} with tracked objects: {self.tracked_objects}")
+            print(f"Current probabilities shape: {self.curr_prob.shape}")
             combined_mask = self.res_man.create_combined_mask_from_probabilities(
-                self.curr_ti, self.curr_prob, self.tracked_objects
+                self.curr_ti, self.curr_prob, self.tracked_objects, self.save_all_visible
             )
-        elif combined_mask is None:
-            # If no combined mask exists, create an empty mask
-            combined_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+            print(f"Created combined mask with shape: {combined_mask.shape}, max value: {combined_mask.max()}")
+        else:
+            # Fallback to disk-based combined mask if no current probabilities
+            combined_mask = self.res_man.get_all_masks(self.curr_ti)
+            if combined_mask is None:
+                # If no combined mask exists, create an empty mask
+                print(f"No combined mask found and no probabilities available for frame {self.curr_ti}")
+                combined_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+            else:
+                print(f"Using disk-based combined mask for frame {self.curr_ti}")
             
         # Only show masks for visible objects
         visible_mask = combined_mask.copy()
         for obj_id in range(1, self.num_objects + 1):
             if obj_id not in self.visible_objects:
                 visible_mask[visible_mask == obj_id] = 0
+                
+        print(f"Visible objects: {self.visible_objects}, visible mask max value: {visible_mask.max()}")
                 
         # Use visible_objects for basic visualization, vis_target_objects for popup/layer modes
         target_objects = self.vis_target_objects if self.vis_mode in ['popup', 'layer'] else list(self.visible_objects)
@@ -326,10 +343,12 @@ class MainController():
         if self.curr_prob is None:
             return
             
-        # Save soft masks for tracked objects using batch saving
+        # Save soft masks only for tracked objects (not visible objects)
+        # This prevents overwriting existing soft masks for untracked objects
         if self.save_soft_mask:
             print(f"Saving soft masks for tracked objects: {self.tracked_objects}")
-            # Prepare batch data
+            
+            # Prepare batch data for tracked objects only
             soft_masks = {}
             for obj_id in range(1, self.num_objects + 1):
                 if obj_id in self.tracked_objects:
@@ -338,7 +357,7 @@ class MainController():
             
             # Use batch saving for better performance
             if soft_masks:
-                self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects)
+                self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects, self.save_all_visible)
                     
         # Update visualization
         self.show_current_frame()
@@ -357,20 +376,17 @@ class MainController():
         if self.curr_image_torch is None:
             print("Failed to convert image to torch format")
             return
-            
-        # Only show masks for visible objects
-        visible_prob = self.curr_prob.clone()
-        for obj_id in range(1, self.num_objects + 1):
-            if obj_id not in self.visible_objects:
-                visible_prob[obj_id] = 0
-                
+        
+        # Always create the proper combined mask that includes existing soft masks for untracked objects
+        # This ensures that during propagation, we can see all visible objects, not just tracked ones
+        self.compose_current_im()
+        
         # Use visible_objects for basic visualization, vis_target_objects for popup/layer modes
         target_objects = self.vis_target_objects if self.vis_mode in ['popup', 'layer'] else list(self.visible_objects)
         
-        # Get visualization
-        self.vis_image = get_visualization_torch(self.vis_mode, self.curr_image_torch,
-                                               visible_prob, self.overlay_layer_torch,
-                                               target_objects)
+        # Get visualization using the composed image (which includes all visible objects)
+        # Note: compose_current_im() already sets self.vis_image, so we don't need to call get_visualization again
+        # Just ensure the image is properly formatted
         self.curr_image_torch = None
         self.vis_image = np.ascontiguousarray(self.vis_image)
         
@@ -516,9 +532,9 @@ class MainController():
                 self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
 
                 self.save_current_mask()
-                # Save soft masks for tracked objects using batch saving
+                # Save soft masks only for tracked objects
                 if self.save_soft_mask:
-                    # Prepare batch data for all tracked objects
+                    # Prepare batch data for tracked objects only
                     soft_masks = {}
                     for obj_id in range(1, self.num_objects + 1):
                         if obj_id in self.tracked_objects:
@@ -527,13 +543,18 @@ class MainController():
                     
                     # Use batch saving for better performance
                     if soft_masks:
-                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects)
+                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects, self.save_all_visible)
+                
+                # Show current frame first to ensure visualization is created
                 self.show_current_frame(fast=True)
-
+                
+                # Then invalidate cache for current frame to ensure fresh combined mask for next iteration
+                self.res_man.invalidate(self.curr_ti)
+                
                 # Update performance stats
                 frame_time = time.time() - frame_start_time
                 self.update_performance_stats(frame_time)
-
+                
                 self.update_memory_gauges()
                 self.gui.process_events()
                 if self.curr_ti == 0 or self.curr_ti == self.T - 1:
@@ -587,9 +608,9 @@ class MainController():
                 self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
 
                 self.save_current_mask()
-                # Save soft masks for tracked objects using batch saving
+                # Save soft masks only for tracked objects
                 if self.save_soft_mask:
-                    # Prepare batch data for all tracked objects
+                    # Prepare batch data for tracked objects only
                     soft_masks = {}
                     for obj_id in range(1, self.num_objects + 1):
                         if obj_id in self.tracked_objects:
@@ -598,9 +619,18 @@ class MainController():
                     
                     # Use batch saving for better performance
                     if soft_masks:
-                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects)
+                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects, self.save_all_visible)
+                
+                # Show current frame first to ensure visualization is created
                 self.show_current_frame(fast=True)
-
+                
+                # Then invalidate cache for current frame to ensure fresh combined mask for next iteration
+                self.res_man.invalidate(self.curr_ti)
+                
+                # Update performance stats
+                frame_time = time.time() - frame_start_time
+                self.update_performance_stats(frame_time)
+                
                 self.update_memory_gauges()
                 self.gui.process_events()
 
@@ -704,22 +734,55 @@ class MainController():
             self.click_ctrl.unanchor()
 
     def on_reset_mask(self):
+        """Reset all masks in the current frame"""
+        print(f"Resetting all masks for frame {self.curr_ti}")
+        
+        # Clear current frame masks
         self.curr_mask.fill(0)
         if self.curr_prob is not None:
             self.curr_prob.fill_(0)
+        
+        # Clear soft masks from disk for all objects in this frame
+        for obj_id in range(1, self.num_objects + 1):
+            soft_mask_path = os.path.join(self.res_man.soft_mask_dir, f'{obj_id}', f'{self.curr_ti:07d}.png')
+            if os.path.exists(soft_mask_path):
+                os.remove(soft_mask_path)
+                print(f"Removed soft mask for object {obj_id} at frame {self.curr_ti}")
+        
+        # Clear cache for this frame to force regeneration
+        self.res_man.invalidate(self.curr_ti)
+        
+        # Update GUI (don't save current mask as it would overwrite the reset)
         self.curr_frame_dirty = True
-        self.save_current_mask()
         self.reset_this_interaction()
         self.show_current_frame()
+        
+        print(f"Reset complete for frame {self.curr_ti}")
 
     def on_reset_object(self):
+        """Reset masks for the current object only"""
+        print(f"Resetting masks for object {self.curr_object} at frame {self.curr_ti}")
+        
+        # Clear current object from current frame masks
         self.curr_mask[self.curr_mask == self.curr_object] = 0
         if self.curr_prob is not None:
             self.curr_prob[self.curr_object] = 0
+        
+        # Clear soft mask from disk for current object in this frame
+        soft_mask_path = os.path.join(self.res_man.soft_mask_dir, f'{self.curr_object}', f'{self.curr_ti:07d}.png')
+        if os.path.exists(soft_mask_path):
+            os.remove(soft_mask_path)
+            print(f"Removed soft mask for object {self.curr_object} at frame {self.curr_ti}")
+        
+        # Clear cache for this frame to force regeneration
+        self.res_man.invalidate(self.curr_ti)
+        
+        # Update GUI (don't save current mask as it would overwrite the reset)
         self.curr_frame_dirty = True
-        self.save_current_mask()
         self.reset_this_interaction()
         self.show_current_frame()
+        
+        print(f"Reset complete for object {self.curr_object} at frame {self.curr_ti}")
 
     def complete_interaction(self):
         if self.interaction is not None:
@@ -886,6 +949,15 @@ class MainController():
         else:
             print("GUI not initialized yet")
 
+    def on_save_all_visible_toggle(self):
+        """Handle include all visible objects in combined masks checkbox toggle"""
+        if hasattr(self, 'gui'):
+            self.save_all_visible = self.gui.save_all_visible_checkbox.isChecked()
+            print(f"Include all visible objects in combined masks toggled: {self.save_all_visible}")
+            print(f"Combined masks will include: {'all visible objects' if self.save_all_visible else 'tracked objects only'}")
+        else:
+            print("GUI not initialized yet")
+
     def on_mouse_motion_xy(self, x, y):
         self.last_ex = x
         self.last_ey = y
@@ -978,7 +1050,17 @@ class MainController():
             self.visible_objects.add(obj_id)
         else:
             self.visible_objects.discard(obj_id)
+            # If show is unchecked, also uncheck track (can't track what you can't see)
+            if obj_id in self.tracked_objects:
+                self.tracked_objects.discard(obj_id)
+                # Update the GUI checkbox state
+                if hasattr(self, 'gui') and hasattr(self.gui, 'track_checkboxes'):
+                    checkbox_index = obj_id - 1  # Convert to 0-based index
+                    if 0 <= checkbox_index < len(self.gui.track_checkboxes):
+                        self.gui.track_checkboxes[checkbox_index].setChecked(False)
+                        print(f"Automatically unchecked track for object {obj_id} because show was unchecked")
         print(f"Visible objects: {self.visible_objects}")
+        print(f"Tracked objects: {self.tracked_objects}")
         self.show_current_frame()
 
     def on_track_checkbox_change(self, obj_id: int, state: int):
@@ -986,8 +1068,18 @@ class MainController():
         print(f"Tracking checkbox changed for object {obj_id}: {state == Qt.CheckState.Checked.value}")
         if state == Qt.CheckState.Checked.value:
             self.tracked_objects.add(obj_id)
+            # If track is checked, also check show (you want to see what you're tracking)
+            if obj_id not in self.visible_objects:
+                self.visible_objects.add(obj_id)
+                # Update the GUI checkbox state
+                if hasattr(self, 'gui') and hasattr(self.gui, 'vis_checkboxes'):
+                    checkbox_index = obj_id - 1  # Convert to 0-based index
+                    if 0 <= checkbox_index < len(self.gui.vis_checkboxes):
+                        self.gui.vis_checkboxes[checkbox_index].setChecked(True)
+                        print(f"Automatically checked show for object {obj_id} because track was checked")
         else:
             self.tracked_objects.discard(obj_id)
+        print(f"Visible objects: {self.visible_objects}")
         print(f"Tracked objects: {self.tracked_objects}")
         self.show_current_frame()
 
@@ -1014,3 +1106,16 @@ class MainController():
     def get_performance_stats(self) -> dict:
         """Get current performance statistics"""
         return self.performance_stats.copy()
+
+    def update_checkbox_states(self):
+        """Update checkbox states to reflect logical relationship between Show and Track"""
+        if not hasattr(self, 'gui') or not hasattr(self.gui, 'vis_checkboxes') or not hasattr(self.gui, 'track_checkboxes'):
+            return
+            
+        for obj_id in range(1, self.num_objects + 1):
+            checkbox_index = obj_id - 1  # Convert to 0-based index
+            if 0 <= checkbox_index < len(self.gui.vis_checkboxes) and 0 <= checkbox_index < len(self.gui.track_checkboxes):
+                # Update track checkbox
+                self.gui.track_checkboxes[checkbox_index].setChecked(obj_id in self.tracked_objects)
+                # Update show checkbox
+                self.gui.vis_checkboxes[checkbox_index].setChecked(obj_id in self.visible_objects)

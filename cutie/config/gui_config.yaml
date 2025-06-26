@@ -64,5 +64,8 @@ performance:
   max_cache_size: 50
   # Enable lazy saving (only save when necessary)
   lazy_saving: True
-  # Save soft masks only for tracked objects
+  # Include all visible objects in combined masks (True) or only tracked objects (False)
+  # Note: Soft masks are always saved only for tracked objects to preserve existing data
+  save_all_visible: True
+  # Save soft masks only for tracked objects (deprecated, soft masks are always saved for tracked objects only)
   save_only_tracked: True
