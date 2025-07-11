@@ -7,7 +7,7 @@ import cv2
 from PIL import Image
 
 # fix conflicts between qt5 and cv2
-os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
+os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
 
 import torch
 try:
@@ -17,7 +17,7 @@ except:
 from torch import autocast
 from torchvision.transforms.functional import to_tensor
 from omegaconf import DictConfig, open_dict
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal, QObject
 
 from cutie.model.cutie import CUTIE
 from cutie.inference.inference_core import InferenceCore
@@ -30,7 +30,22 @@ from gui.click_controller import ClickController
 from gui.reader import PropagationReader, get_data_loader
 from gui.exporter import convert_frames_to_video, convert_mask_to_binary
 from scripts.download_models import download_models_if_needed
-from utils.mask_metrics import calculate_mask_metrics_batch, calculate_all_pairwise_metrics, save_pairwise_metrics
+from utils.mask_metrics import (
+    calculate_mask_metrics_batch, 
+    calculate_all_pairwise_metrics, 
+    calculate_all_pairwise_metrics_optimized, 
+    calculate_all_pairwise_metrics_batch_optimized,
+    calculate_all_pairwise_metrics_ultra_optimized,
+    calculate_all_pairwise_metrics_mega_optimized,
+    save_pairwise_metrics
+)
+from utils.performance_monitor import start_global_monitoring, stop_global_monitoring, update_global_frame_count, print_global_summary
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from cutie.utils.palette import davis_palette_np
+from typing import Dict, List, Tuple
 
 log = logging.getLogger()
 
@@ -90,6 +105,9 @@ class MainController():
         self.lazy_saving = cfg.get('performance', {}).get('lazy_saving', True)
         self.save_only_tracked = cfg.get('performance', {}).get('save_only_tracked', True)
         self.save_all_visible = cfg.get('performance', {}).get('save_all_visible', True)
+        self.pairwise_metrics_batch_size = cfg.get('performance', {}).get('pairwise_metrics_batch_size', 50)
+        self.pairwise_metrics_max_workers = cfg.get('performance', {}).get('pairwise_metrics_max_workers', 8)
+        self.pairwise_metrics_optimization_level = cfg.get('performance', {}).get('pairwise_metrics_optimization_level', 'mega')
         
         print(f"Performance settings:")
         print(f"  - Batch save soft masks: {self.batch_save_soft_masks}")
@@ -97,6 +115,9 @@ class MainController():
         print(f"  - Lazy saving: {self.lazy_saving}")
         print(f"  - Save all visible objects: {self.save_all_visible}")
         print(f"  - Save only tracked objects: {self.save_only_tracked}")
+        print(f"  - Pairwise metrics batch size: {self.pairwise_metrics_batch_size}")
+        print(f"  - Pairwise metrics max workers: {self.pairwise_metrics_max_workers}")
+        print(f"  - Pairwise metrics optimization level: {self.pairwise_metrics_optimization_level}")
         
         # Create GUI after initializing other components
         self.gui = GUI(self, self.cfg)
@@ -1013,7 +1034,7 @@ class MainController():
             self.gui.text(f'Error exporting mask metrics: {str(e)}')
 
     def on_save_pairwise_metrics(self):
-        """Handle saving pairwise metrics"""
+        """Handle saving pairwise metrics in background thread"""
         # Get selected metrics
         selected_metrics = []
         if self.gui.distance_cb.isChecked():
@@ -1029,19 +1050,59 @@ class MainController():
             
         # Get output filename
         output_filename = "pairwise_metrics.npz"
+        output_path = Path(self.cfg['workspace']) / output_filename
         
-        try:
-            # Calculate metrics
-            mask_folder = Path(self.cfg['workspace']) / 'masks'
-            metrics_dict = calculate_all_pairwise_metrics(str(mask_folder), self.num_objects)
+        # Check if mask folder exists
+        mask_folder = Path(self.cfg['workspace']) / 'masks'
+        if not mask_folder.exists():
+            self.gui.text('No masks folder found. Please track some objects first.')
+            return
             
-            # Save metrics
-            output_path = Path(self.cfg['workspace']) / output_filename
-            save_pairwise_metrics(metrics_dict, str(output_path))
-            
-            self.gui.text(f'Successfully saved pairwise metrics to {output_filename}')
-        except Exception as e:
-            self.gui.text(f'Error saving pairwise metrics: {str(e)}')
+        # Disable the button to prevent multiple clicks
+        self.gui.save_pairwise_button.setEnabled(False)
+        self.gui.save_pairwise_button.setText("Calculating...")
+        # Reset progress bar
+        self.gui.progressbar_update(0.0)
+        
+        # Create worker and thread with performance configuration
+        self.pairwise_worker = PairwiseMetricsWorker(
+            mask_folder, 
+            self.num_objects, 
+            output_path,
+            batch_size=self.pairwise_metrics_batch_size,
+            max_workers=self.pairwise_metrics_max_workers,
+            optimization_level=self.pairwise_metrics_optimization_level
+        )
+        self.pairwise_thread = QThread()
+        
+        # Move worker to thread
+        self.pairwise_worker.moveToThread(self.pairwise_thread)
+        
+        # Connect signals
+        self.pairwise_thread.started.connect(self.pairwise_worker.run)
+        self.pairwise_worker.finished.connect(self.pairwise_thread.quit)
+        self.pairwise_worker.finished.connect(self.pairwise_worker.deleteLater)
+        self.pairwise_thread.finished.connect(self.pairwise_thread.deleteLater)
+        
+        # Connect progress and result signals
+        self.pairwise_worker.progress.connect(self.gui.text)
+        self.pairwise_worker.progress_value.connect(self.gui.progressbar_update)
+        self.pairwise_worker.success.connect(self.gui.text)
+        self.pairwise_worker.error.connect(self.gui.text)
+        
+        # Connect cleanup signal
+        self.pairwise_thread.finished.connect(self._on_pairwise_metrics_finished)
+        
+        # Start the thread
+        self.pairwise_thread.start()
+        
+    def _on_pairwise_metrics_finished(self):
+        """Clean up after pairwise metrics calculation is complete"""
+        # Re-enable the button
+        self.gui.save_pairwise_button.setEnabled(True)
+        self.gui.save_pairwise_button.setText("Save Pairwise Metrics")
+        # Reset progress bar
+        self.gui.progressbar_update(0.0)
 
     def on_vis_checkbox_change(self, obj_id: int, state: int):
         """Handle visibility checkbox state change"""
@@ -1119,3 +1180,83 @@ class MainController():
                 self.gui.track_checkboxes[checkbox_index].setChecked(obj_id in self.tracked_objects)
                 # Update show checkbox
                 self.gui.vis_checkboxes[checkbox_index].setChecked(obj_id in self.visible_objects)
+
+
+class PairwiseMetricsWorker(QObject):
+    """Worker class for calculating pairwise metrics in background thread"""
+    finished = Signal()
+    progress = Signal(str)
+    progress_value = Signal(float)  # For progress bar updates (0.0 to 1.0)
+    error = Signal(str)
+    success = Signal(str)
+    
+    def __init__(self, mask_folder, num_objects, output_path, batch_size=50, max_workers=8, optimization_level='mega'):
+        super().__init__()
+        self.mask_folder = mask_folder
+        self.num_objects = num_objects
+        self.output_path = output_path
+        self.batch_size = batch_size
+        self.max_workers = max_workers
+        self.optimization_level = optimization_level
+        
+    def run(self):
+        try:
+            # Start performance monitoring
+            start_global_monitoring(interval=2.0)
+            print("Performance monitoring started")
+            
+            self.progress.emit("Calculating pairwise metrics (optimized)...")
+            self.progress_value.emit(0.1)
+            
+            # Choose optimization level based on configuration
+            print(f"Starting {self.optimization_level}-optimized pairwise metrics calculation...")
+            print(f"  - Batch size: {self.batch_size}")
+            print(f"  - Max workers: {self.max_workers}")
+            print(f"  - Objects: {self.num_objects}")
+            print(f"  - Optimization level: {self.optimization_level}")
+            
+            try:
+                metrics_dict = calculate_all_pairwise_metrics_optimized(
+                    str(self.mask_folder), 
+                    self.num_objects, 
+                    max_workers=self.max_workers
+                )
+            except Exception as optimization_error:
+                error_msg = f"{self.optimization_level.capitalize()} optimization failed, falling back to standard version: {str(optimization_error)}"
+                print(error_msg)
+                self.progress.emit(error_msg)
+                # Fallback to the standard optimized version
+                print(f"Starting standard optimized pairwise metrics calculation...")
+                metrics_dict = calculate_all_pairwise_metrics_optimized(
+                    str(self.mask_folder), 
+                    self.num_objects, 
+                    max_workers=self.max_workers
+                )
+            
+            self.progress_value.emit(0.8)
+            
+            self.progress.emit("Saving metrics to file...")
+            print("Saving pairwise metrics to file...")
+            self.progress_value.emit(0.9)
+            
+            # Save metrics
+            save_pairwise_metrics(metrics_dict, str(self.output_path))
+            self.progress_value.emit(1.0)
+            
+            # Stop performance monitoring and print summary
+            stop_global_monitoring()
+            print_global_summary()
+            
+            success_msg = f'Successfully saved pairwise metrics to {self.output_path.name}'
+            print(success_msg)
+            self.success.emit(success_msg)
+            self.finished.emit()
+            
+        except Exception as e:
+            # Stop performance monitoring on error
+            stop_global_monitoring()
+            
+            error_msg = f'Error saving pairwise metrics: {str(e)}'
+            print(error_msg)
+            self.error.emit(error_msg)
+            self.finished.emit()

@@ -531,6 +531,8 @@ class GUI(QWidget):
     def text(self, text):
         self.console.moveCursor(QTextCursor.MoveOperation.End)
         self.console.insertPlainText(text + '\n')
+        # Also print to terminal for better visibility
+        print(f"GUI: {text}")
 
     def set_canvas(self, image):
         height, width, channel = image.shape

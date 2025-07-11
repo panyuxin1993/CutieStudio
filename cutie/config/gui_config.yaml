@@ -69,3 +69,7 @@ performance:
   save_all_visible: True
   # Save soft masks only for tracked objects (deprecated, soft masks are always saved for tracked objects only)
   save_only_tracked: True
+  # for calculating pairwise metrics
+  pairwise_metrics_optimization_level: "normal" # "mega" or "normal"
+  pairwise_metrics_batch_size: 50
+  pairwise_metrics_max_workers: 32
