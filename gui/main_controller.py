@@ -35,8 +35,6 @@ from utils.mask_metrics import (
     calculate_all_pairwise_metrics, 
     calculate_all_pairwise_metrics_optimized, 
     calculate_all_pairwise_metrics_batch_optimized,
-    calculate_all_pairwise_metrics_ultra_optimized,
-    calculate_all_pairwise_metrics_mega_optimized,
     save_pairwise_metrics
 )
 from utils.performance_monitor import start_global_monitoring, stop_global_monitoring, update_global_frame_count, print_global_summary
