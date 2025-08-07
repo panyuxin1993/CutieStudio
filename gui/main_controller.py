@@ -998,7 +998,15 @@ class MainController():
         if not output_filename.endswith('.csv'):
             output_filename += '.csv'
             
-        print(f"\nExporting mask metrics to {output_filename}")
+        # Handle both cases: just filename or full path
+        # if Path(output_filename).is_absolute():
+            # GUI contains full path, use it directly
+        output_path = Path(output_filename)
+        # else:
+        #     # GUI contains just filename, construct full path in workspace
+        #     output_path = Path(self.cfg['workspace']) / output_filename
+            
+        print(f"\nExporting mask metrics to {output_path}")
         print(f"Number of objects: {self.num_objects}")
         print(f"Object names: {self.name_objects}")
             
@@ -1011,10 +1019,42 @@ class MainController():
         print(f"Found mask folder at {mask_folder}")
         mask_files = list(mask_folder.glob('*.png'))
         print(f"Found {len(mask_files)} mask files")
+        
+        # Check if previous metrics file exists in workspace directory
+        previous_df = None
+        print(f"Looking for previous metrics file at: {output_path}")
+        print(f"Workspace directory: {self.cfg['workspace']}")
+        print(f"Output filename from GUI: {output_filename}")
+        
+        if output_path.exists():
+            try:
+                print(f"Found existing metrics file: {output_path}")
+                previous_df = pd.read_csv(output_path)
+                print(f"Loaded previous metrics with {len(previous_df)} rows")
+                print(f"Previous metrics columns: {previous_df.columns.tolist()}")
+                
+                # Validate that the previous dataframe has the expected structure
+                expected_columns = ['frame', 'object_id', 'object_name', 'area', 'perimeter', 
+                                  'circularity', 'orientation', 'bbox_x', 'bbox_y', 
+                                  'bbox_width', 'bbox_height', 'center_x', 'center_y']
+                missing_columns = [col for col in expected_columns if col not in previous_df.columns]
+                if missing_columns:
+                    print(f"WARNING: Previous metrics file missing columns: {missing_columns}")
+                    print("Will recalculate all metrics")
+                    previous_df = None
+                else:
+                    print("Previous metrics file structure is valid")
+                    
+            except Exception as e:
+                print(f"WARNING: Failed to load previous metrics file: {str(e)}")
+                print("Will recalculate all metrics")
+                previous_df = None
+        else:
+            print(f"No previous metrics file found at {output_path}, will calculate all metrics")
             
         try:
             print("\nCalculating mask metrics...")
-            df = calculate_mask_metrics_batch(mask_folder, self.num_objects, self.name_objects)
+            df = calculate_mask_metrics_batch(mask_folder, self.num_objects, self.name_objects, previous_df)
             
             if df.empty:
                 print("WARNING: No metrics were calculated - DataFrame is empty")
@@ -1024,9 +1064,19 @@ class MainController():
             print(f"\nWriting metrics to CSV file...")
             print(f"DataFrame shape: {df.shape}")
             print(f"Columns: {df.columns.tolist()}")
-            df.to_csv(output_filename, index=False)
-            print(f"Successfully wrote {len(df)} rows to {output_filename}")
-            self.gui.text(f'Successfully exported mask metrics to {output_filename}')
+            df.to_csv(output_path, index=False)
+            print(f"Successfully wrote {len(df)} rows to {output_path}")
+            
+            # Provide feedback about what was calculated
+            if previous_df is not None:
+                new_rows = len(df) - len(previous_df)
+                if new_rows > 0:
+                    self.gui.text(f'Successfully exported mask metrics to {output_filename} (added {new_rows} new rows)')
+                else:
+                    self.gui.text(f'Successfully exported mask metrics to {output_filename} (no new calculations needed)')
+            else:
+                self.gui.text(f'Successfully exported mask metrics to {output_filename}')
+                
         except Exception as e:
             print(f"ERROR: Failed to export mask metrics: {str(e)}")
             self.gui.text(f'Error exporting mask metrics: {str(e)}')

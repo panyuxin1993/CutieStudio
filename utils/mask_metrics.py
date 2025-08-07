@@ -226,14 +226,17 @@ def calculate_mask_metrics(mask_path: str, num_objects: int = None, object_names
     else:
         return pd.DataFrame()
 
-def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, object_names: List[str] = None) -> pd.DataFrame:
+def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, object_names: List[str] = None, previous_df: pd.DataFrame = None) -> pd.DataFrame:
     """
     Calculate metrics for all masks in a folder using soft masks.
+    If previous_df is provided, only calculate metrics for frames that haven't been calculated yet
+    or have invalid/dummy data.
     
     Args:
         mask_folder: Path to folder containing mask files
         num_objects: Number of objects to expect
         object_names: Optional list of object names
+        previous_df: Optional DataFrame with previously calculated metrics
         
     Returns:
         DataFrame containing metrics for all frames and objects
@@ -259,23 +262,88 @@ def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, obje
         print("ERROR: No soft mask files found")
         return pd.DataFrame()
         
+    frame_indices = sorted(frame_indices)
     print(f"Found {len(frame_indices)} frames with soft masks")
     
-    # Process each frame
-    all_metrics = []
-    for frame_idx in sorted(frame_indices):
+    # Determine which frames need calculation
+    frames_to_calculate = []
+    
+    if previous_df is not None and not previous_df.empty:
+        print(f"Previous dataframe contains {len(previous_df)} rows")
+        
+        # Get frames that already have valid metrics
+        existing_frames = set(previous_df['frame'].unique())
+        print(f"Frames with existing metrics: {len(existing_frames)}")
+        
+        # Check which frames need recalculation
+        for frame_idx in frame_indices:
+            if frame_idx not in existing_frames:
+                # Frame doesn't exist in previous data
+                frames_to_calculate.append(frame_idx)
+            else:
+                # Frame exists, check if it has valid data
+                frame_data = previous_df[previous_df['frame'] == frame_idx]
+                if frame_data.empty:
+                    frames_to_calculate.append(frame_idx)
+                else:
+                    # Check if any object has valid metrics (non-zero area and valid perimeter)
+                    has_valid_data = False
+                    for _, row in frame_data.iterrows():
+                        if (row['area'] > 0 and 
+                            row['perimeter'] > 0 and 
+                            not pd.isna(row['circularity']) and
+                            not pd.isna(row['orientation'])):
+                            has_valid_data = True
+                            break
+                    
+                    if not has_valid_data:
+                        print(f"Frame {frame_idx} has invalid/dummy data, will recalculate")
+                        frames_to_calculate.append(frame_idx)
+                    else:
+                        print(f"Frame {frame_idx} has valid data, skipping")
+    else:
+        # No previous data, calculate all frames
+        frames_to_calculate = frame_indices
+        print("No previous data provided, calculating all frames")
+    
+    if not frames_to_calculate:
+        print("All frames already have valid metrics, returning previous dataframe")
+        return previous_df
+    
+    print(f"Calculating metrics for {len(frames_to_calculate)} frames")
+    
+    # Process frames that need calculation
+    new_metrics = []
+    for frame_idx in tqdm(frames_to_calculate, desc="Processing frames"):
         # Create a dummy mask path to pass to calculate_mask_metrics
         dummy_mask_path = mask_folder / f"{frame_idx:07d}.png"
         frame_metrics = calculate_mask_metrics(str(dummy_mask_path), num_objects, object_names)
         if not frame_metrics.empty:
-            all_metrics.append(frame_metrics)
+            new_metrics.append(frame_metrics)
             
-    if not all_metrics:
-        print("WARNING: No metrics were calculated for any frames")
-        return pd.DataFrame()
+    if not new_metrics:
+        print("WARNING: No new metrics were calculated")
+        return previous_df if previous_df is not None else pd.DataFrame()
         
-    # Combine all frame metrics
-    return pd.concat(all_metrics, ignore_index=True)
+    # Combine new frame metrics
+    new_df = pd.concat(new_metrics, ignore_index=True)
+    print(f"Calculated {len(new_df)} new metric rows")
+    
+    # Merge with previous dataframe if it exists
+    if previous_df is not None and not previous_df.empty:
+        # Remove any existing rows for frames we just recalculated
+        frames_to_remove = set(frames_to_calculate)
+        filtered_previous = previous_df[~previous_df['frame'].isin(frames_to_remove)]
+        
+        # Combine filtered previous data with new data
+        combined_df = pd.concat([filtered_previous, new_df], ignore_index=True)
+        combined_df = combined_df.sort_values(['frame', 'object_id']).reset_index(drop=True)
+        
+        print(f"Combined dataframe: {len(combined_df)} total rows")
+        return combined_df
+    else:
+        # No previous data, return just the new data
+        return new_df
 
 def calculate_pairwise_metrics(mask1: np.ndarray, mask2: np.ndarray) -> dict:
     """
