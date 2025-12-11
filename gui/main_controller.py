@@ -594,10 +594,15 @@ class MainController():
         with autocast(self.device, enabled=(self.amp and self.device == 'cuda')):
             self.convert_current_image_mask_torch()
 
+            self.tracked_prob = self.curr_prob.clone()
+            for obj_id in range(1, self.num_objects + 1):
+                if obj_id not in self.tracked_objects:
+                    self.tracked_prob[obj_id] = 0
+
             self.gui.text(f'Propagation started at t={self.curr_ti}.')
             self.processor.clear_sensory_memory()
             self.curr_prob = self.processor.step(self.curr_image_torch,
-                                                 self.curr_prob[1:],
+                                                 self.tracked_prob[1:],
                                                  idx_mask=False)
             self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
             # clear
@@ -615,10 +620,14 @@ class MainController():
             dataset = PropagationReader(self.res_man, self.curr_ti, self.propagate_direction)
             loader = get_data_loader(dataset, self.cfg.num_read_workers)
 
-            # propagate till the end
+            # propagate for one frame only
             for data in loader:
                 if not self.propagating:
                     break
+                    
+                # Start timing
+                frame_start_time = time.time()
+                    
                 self.curr_image_np, self.curr_image_torch = data
                 self.curr_image_torch = self.curr_image_torch.to(self.device, non_blocking=True)
                 self.propagate_fn()
@@ -658,6 +667,8 @@ class MainController():
                 self.on_clear_memory()
                 if self.curr_ti == 0 or self.curr_ti == self.T - 1:
                     break
+                # Break after processing one frame (this is step_propagate, not full propagation)
+                break
 
             self.propagating = False
             self.curr_frame_dirty = False
