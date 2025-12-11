@@ -744,6 +744,12 @@ class MainController():
         object_id = self.gui.object_dial.value()
         self.hit_number_key(object_id)
 
+    def on_frame_dial_change(self):
+        """Handle frame dial changes"""
+        frame_id = self.gui.frame_dial.value()
+        self.gui.tl_slider.setValue(frame_id)
+        # on_slider_update will be triggered automatically by the slider's valueChanged signal
+
     def on_fps_dial_change(self):
         self.output_fps = self.gui.fps_dial.value()
 

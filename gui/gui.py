@@ -91,13 +91,6 @@ class GUI(QWidget):
         self.reset_object_button = QPushButton('Reset object')
         self.reset_object_button.clicked.connect(controller.on_reset_object)
 
-        # set up the LCD
-        self.lcd = QTextEdit()
-        self.lcd.setReadOnly(True)
-        self.lcd.setMaximumHeight(28)
-        self.lcd.setMaximumWidth(150)
-        self.lcd.setText('{: 5d} / {: 5d}'.format(0, controller.T - 1))
-
         # current object id
         self.object_dial = QSpinBox()
         self.object_dial.setReadOnly(False)
@@ -113,6 +106,15 @@ class GUI(QWidget):
         self.frame_name = QLabel()
         self.frame_name.setMinimumSize(100, 30)
         self.frame_name.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        # Frame ID selector (similar to object_dial) - combines display and input
+        self.frame_dial = QSpinBox()
+        self.frame_dial.setReadOnly(False)
+        self.frame_dial.setMinimumSize(100, 30)
+        self.frame_dial.setMinimum(0)
+        self.frame_dial.setMaximum(controller.T - 1)
+        self.frame_dial.setSuffix(f' / {controller.T - 1}')  # Show "current / total" format
+        self.frame_dial.editingFinished.connect(controller.on_frame_dial_change)
 
 
         # timeline slider
@@ -235,7 +237,8 @@ class GUI(QWidget):
         interact_topbox = QHBoxLayout()
         interact_botbox = QHBoxLayout()
         interact_topbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        interact_topbox.addWidget(self.lcd)
+        interact_topbox.addWidget(QLabel('Frame:'))
+        interact_topbox.addWidget(self.frame_dial)  # Combined display and input widget
         interact_topbox.addWidget(self.play_button)
         interact_topbox.addWidget(self.reset_frame_button)
         interact_topbox.addWidget(self.reset_object_button)
@@ -560,8 +563,10 @@ class GUI(QWidget):
     def update_slider(self, value):
         """Update slider value and display"""
         print(f"Updating slider to value: {value}")
-        self.lcd.setText('{: 3d} / {: 3d}'.format(value, self.controller.T - 1))
         self.tl_slider.setValue(value)
+        # Update frame dial to keep it in sync (it will show "value / total" automatically via suffix)
+        if hasattr(self, 'frame_dial'):
+            self.frame_dial.setValue(value)
         print(f"Slider updated to: {self.tl_slider.value()}")
 
     def pixel_pos_to_image_pos(self, x, y):
