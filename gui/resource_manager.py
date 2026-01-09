@@ -100,12 +100,16 @@ class ResourceManager:
         os.makedirs(self.all_masks_dir, exist_ok=True)
 
         # create all soft mask sub-directories
-        for i in range(1, cfg['num_objects'] + 1):
+        self.num_objects = cfg['num_objects']
+        for i in range(1, self.num_objects + 1):
             os.makedirs(path.join(self.soft_mask_dir, f'{i}'), exist_ok=True)
 
         # convert read functions to be buffered
         self.get_image = LRU(self._get_image_unbuffered, maxsize=cfg['buffer_size'])
-        self.get_mask = LRU(self._get_mask_unbuffered, maxsize=cfg['buffer_size'])
+        # Note: get_mask now requires tracked_objects parameter, so we don't use LRU cache
+        # Call _get_mask_unbuffered directly with tracked_objects parameter
+        # For convenience, create a simple wrapper
+        self.get_mask = self._get_mask_unbuffered
 
         # extract frames from video
         if need_decoding:
@@ -207,14 +211,14 @@ class ResourceManager:
             queue.task_done()
 
     def _save_batch_soft_masks(self, batch_data: Dict, frame_name: str):
-        """Optimized batch saving of soft masks"""
+        """Optimized batch saving of soft masks with multi-channel format for overlapping masks"""
         try:
             frame_idx = batch_data.get('frame_idx')
             soft_masks = batch_data.get('soft_masks', {})  # {obj_id: mask_array}
             tracked_objects = batch_data.get('tracked_objects', set())
-            save_all_visible = batch_data.get('save_all_visible', True)  # Default to True for backward compatibility
+            save_all_visible = batch_data.get('save_all_visible', True)
             
-            # Save individual soft masks for tracked objects only
+            # Save individual soft masks for tracked objects only (binary format)
             for obj_id, mask_array in soft_masks.items():
                 # Only save if object is tracked
                 if obj_id in tracked_objects:
@@ -223,44 +227,76 @@ class ResourceManager:
                     binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
                     cv2.imwrite(save_path, binary_mask)
             
-            # Create combined mask that includes all visible objects from existing soft masks
+            # Create fixed-size multi-channel mask (num_objects, H, W)
+            # Channel i-1 always corresponds to object ID i
+            # Get dimensions from first soft mask or use default
+            h, w = None, None
             if soft_masks:
-                # Get dimensions from first mask
                 first_mask = next(iter(soft_masks.values()))
                 h, w = first_mask.shape
-                combined_mask = np.zeros((h, w), dtype=np.uint8)
+            elif hasattr(self, 'height') and hasattr(self, 'width'):
+                h, w = self.height, self.width
+            else:
+                # Try to get dimensions from an existing soft mask
+                for obj_id in range(1, self.num_objects + 1):
+                    existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
+                    if os.path.exists(existing_mask_path):
+                        existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
+                        if existing_mask is not None:
+                            h, w = existing_mask.shape
+                            break
+            
+            if h is None or w is None:
+                print(f"Warning: Could not determine dimensions for frame {frame_idx}, skipping all_masks update")
+                return
+            
+            # Create fixed-size multi-channel mask: (num_objects, H, W)
+            # Channel i-1 corresponds to object ID i
+            multi_channel_mask = np.zeros((self.num_objects, h, w), dtype=np.float32)
+            
+            # Fill channels with masks from tracked objects (current probabilities)
+            for obj_id in range(1, self.num_objects + 1):
+                channel_idx = obj_id - 1  # Channel 0 = object 1, channel 1 = object 2, etc.
                 
-                # First, add tracked objects from current probabilities
-                for obj_id, mask_array in soft_masks.items():
-                    if obj_id in tracked_objects:
-                        binary_mask = (mask_array > 0.5).astype(np.uint8)
-                        combined_mask[binary_mask > 0] = obj_id
+                if obj_id in tracked_objects and obj_id in soft_masks:
+                    # Use current probability mask for tracked objects
+                    mask_array = soft_masks[obj_id]
+                    # Resize if dimensions don't match
+                    if mask_array.shape != (h, w):
+                        mask_array = cv2.resize(mask_array, (w, h), interpolation=cv2.INTER_LINEAR)
+                    multi_channel_mask[channel_idx] = mask_array.astype(np.float32)
+                elif save_all_visible or obj_id in tracked_objects:
+                    # Load from existing soft mask for untracked objects (if save_all_visible) or tracked objects without current prob
+                    existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
+                    if os.path.exists(existing_mask_path):
+                        existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
+                        if existing_mask is not None:
+                            # Resize if dimensions don't match
+                            if existing_mask.shape != (h, w):
+                                existing_mask = cv2.resize(existing_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                            # Convert binary mask to probability (0.0 or 1.0)
+                            multi_channel_mask[channel_idx] = (existing_mask > 127).astype(np.float32)
+            
+            # Save multi-channel mask as .npy file (fixed size: num_objects channels)
+            npy_path = os.path.join(self.all_masks_dir, f'{frame_idx:07d}.npy')
+            np.save(npy_path, multi_channel_mask)
+            
+            # Count how many objects have non-zero masks
+            non_empty_channels = np.sum([np.any(multi_channel_mask[i] > 0.5) for i in range(self.num_objects)])
+            print(f"Saved all_masks for frame {frame_idx}: {non_empty_channels}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape})")
+            
+            # Cache the multi-channel mask if enabled
+            if self.enable_mask_cache and self.mask_cache is not None:
+                # Store with implicit object IDs (channel i-1 = object ID i)
+                self.mask_cache[frame_idx] = {
+                    'mask': multi_channel_mask.copy(),
+                    'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping
+                }
                 
-                # Then, add existing soft masks for untracked objects if save_all_visible is enabled
-                if save_all_visible:
-                    for obj_id in range(1, 100):  # Check reasonable range of object IDs
-                        if obj_id not in tracked_objects:  # Only for untracked objects
-                            existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
-                            if os.path.exists(existing_mask_path):
-                                existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
-                                if existing_mask is not None:
-                                    # Add existing mask to combined mask
-                                    binary_mask = (existing_mask > 127).astype(np.uint8)
-                                    combined_mask[binary_mask > 0] = obj_id
-                
-                # Save combined mask
-                mask_img = Image.fromarray(combined_mask, mode='P')
-                mask_img.putpalette(self.palette)
-                mask_img.save(os.path.join(self.all_masks_dir, f'{frame_idx:07d}.png'))
-                
-                # Cache the combined mask if enabled
-                if self.enable_mask_cache and self.mask_cache is not None:
-                    self.mask_cache[frame_idx] = combined_mask.copy()
-                    
-                    # Clean up cache if too large
-                    if len(self.mask_cache) > self.cache_size_limit:
-                        oldest_key = min(self.mask_cache.keys())
-                        del self.mask_cache[oldest_key]
+                # Clean up cache if too large
+                if len(self.mask_cache) > self.cache_size_limit:
+                    oldest_key = min(self.mask_cache.keys())
+                    del self.mask_cache[oldest_key]
         except Exception as e:
             print(f"Error in batch soft mask saving: {str(e)}")
             # Fall back to individual saving if batch saving fails
@@ -324,13 +360,43 @@ class ResourceManager:
                 'The save queue is full! You need more threads or faster IO. Program might pause.')
         self.save_queue.put(item)
 
-    def save_mask(self, ti: int, mask: np.ndarray):
-        # mask should be uint8 H*W without channels
+    def save_mask(self, ti: int, mask: np.ndarray, tracked_objects: set = None):
+        """Save mask to masks folder for inference (ONLY tracked objects)
+        
+        IMPORTANT: This saves single-channel masks with ONLY tracked objects to prevent
+        untracked objects from interfering with inference. Each pixel is the index of
+        a tracked object or 0 (background/untracked).
+        
+        Args:
+            ti: Frame index
+            mask: Input mask (H*W) with object IDs
+            tracked_objects: Set of object IDs that are being tracked (ONLY these are saved)
+                           If None, extracts from mask
+        """
         assert 0 <= ti < self.length
         assert isinstance(mask, np.ndarray)
 
-        # Convert to PIL Image in 'P' mode
-        mask_img = Image.fromarray(mask, mode='P')
+        # Get dimensions from input mask
+        h, w = mask.shape[0], mask.shape[1]
+        
+        # Determine tracked objects
+        if tracked_objects is None:
+            # Extract from input mask
+            unique_ids = np.unique(mask)
+            tracked_objects = set([int(id) for id in unique_ids if id > 0])
+        
+        if not tracked_objects:
+            # No tracked objects, save empty mask
+            inference_mask = np.zeros((h, w), dtype=np.uint8)
+        else:
+            # Create inference mask with ONLY tracked objects
+            # Untracked objects become 0 (background)
+            inference_mask = np.zeros((h, w), dtype=np.uint8)
+            for obj_id in tracked_objects:
+                inference_mask[mask == obj_id] = obj_id
+        
+        # Convert to PIL Image in 'P' mode (single-channel with palette)
+        mask_img = Image.fromarray(inference_mask, mode='P')
         
         # Ensure palette is in correct format (list of RGB values)
         if isinstance(self.palette, bytes):
@@ -394,127 +460,184 @@ class ResourceManager:
         self.add_to_queue_with_warning(SaveItem('batch_soft_mask', batch_data, self.names[ti]))
 
     def update_all_masks(self, ti: int):
-        """Combine all available masks from soft_masks into a single mask in all_masks"""
+        """Combine all available masks from soft_masks into fixed-size multi-channel format in all_masks
+        
+        Creates fixed-size mask (num_objects, H, W) where channel i-1 = object ID i.
+        No need for _ids.npy file since the mapping is fixed.
+        """
         print(f"Updating all_masks for frame {ti}")
-        # Get all object directories
-        obj_dirs = [d for d in os.listdir(self.soft_mask_dir) if os.path.isdir(os.path.join(self.soft_mask_dir, d))]
         
-        if not obj_dirs:
-            print("No object directories found in soft_masks")
-            return
-            
-        # Find first valid mask to get dimensions
-        h, w = None, None
-        for obj_id in obj_dirs:
-            mask_path = os.path.join(self.soft_mask_dir, obj_id, f'{ti:07d}.png')
+        # Create fixed-size multi-channel mask: (num_objects, H, W)
+        # Channel i-1 always corresponds to object ID i
+        multi_channel_mask = np.zeros((self.num_objects, self.height, self.width), dtype=np.float32)
+        
+        # Load masks from all objects into their corresponding channels
+        objects_with_masks = 0
+        for obj_id in range(1, self.num_objects + 1):
+            channel_idx = obj_id - 1
+            mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{ti:07d}.png')
             if os.path.exists(mask_path):
                 mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                 if mask is not None:
-                    h, w = mask.shape
-                    break
-                    
-        if h is None or w is None:
-            print(f"No valid masks found for frame {ti}")
-            return
+                    # Resize if dimensions don't match
+                    if mask.shape != (self.height, self.width):
+                        mask = cv2.resize(mask, (self.width, self.height), interpolation=cv2.INTER_NEAREST)
+                    # Convert binary mask to probability (0.0 or 1.0)
+                    multi_channel_mask[channel_idx] = (mask > 127).astype(np.float32)
+                    if np.any(multi_channel_mask[channel_idx] > 0.5):
+                        objects_with_masks += 1
+        
+        # Save multi-channel mask as .npy file (fixed size: num_objects channels)
+        npy_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npy')
+        np.save(npy_path, multi_channel_mask)
+        
+        print(f"Saved fixed-size multi-channel mask to {npy_path}: {objects_with_masks}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape})")
+        
+        # Update cache if enabled
+        if self.enable_mask_cache and self.mask_cache is not None:
+            self.mask_cache[ti] = {
+                'mask': multi_channel_mask.copy(),
+                'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping
+            }
             
-        # Create a combined mask
-        combined_mask = np.zeros((h, w), dtype=np.uint8)
-        
-        # Combine masks from all objects
-        for obj_id in obj_dirs:
-            mask_path = os.path.join(self.soft_mask_dir, obj_id, f'{ti:07d}.png')
-            if os.path.exists(mask_path):
-                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                if mask is not None:
-                    # Use object ID as the mask value
-                    combined_mask[mask > 127] = int(obj_id)
-        
-        # Save combined mask in DAVIS format
-        mask_img = Image.fromarray(combined_mask, mode='P')
-        mask_img.putpalette(self.palette)
-        mask_img.save(os.path.join(self.all_masks_dir, f'{ti:07d}.png'))
-        print(f"Saved combined mask to {os.path.join(self.all_masks_dir, f'{ti:07d}.png')}")
+            # Clean up cache if too large
+            if len(self.mask_cache) > self.cache_size_limit:
+                oldest_key = min(self.mask_cache.keys())
+                del self.mask_cache[oldest_key]
 
-    def get_all_masks(self, ti: int) -> np.ndarray:
-        """Get the combined mask from all_masks directory or cache"""
+    def get_all_masks(self, ti: int) -> Union[np.ndarray, Dict]:
+        """Get the combined mask from all_masks directory or cache
+        
+        Returns fixed-size multi-channel mask (num_objects, H, W) where channel i-1 = object ID i.
+        No need for _ids.npy file since the mapping is fixed.
+        
+        Returns:
+            dict with 'mask' (num_objects*H*W) and 'object_ids' (list 1..num_objects) keys
+            None if no mask exists
+        """
         # Check cache first if enabled
         if self.enable_mask_cache and self.mask_cache is not None and ti in self.mask_cache:
             return self.mask_cache[ti]
             
-        # Load from disk if not in cache
-        mask_path = os.path.join(self.all_masks_dir, f'{ti:07d}.png')
-        if os.path.exists(mask_path):
-            mask = Image.open(mask_path)
-            mask_array = np.array(mask)
-            # Cache the result if enabled
-            if self.enable_mask_cache and self.mask_cache is not None:
-                self.mask_cache[ti] = mask_array
+        # Load fixed-size multi-channel format (.npy)
+        npy_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npy')
+        
+        if os.path.exists(npy_path):
+            try:
+                multi_channel_mask = np.load(npy_path)
                 
-                # Clean up cache if too large
-                if len(self.mask_cache) > self.cache_size_limit:
-                    oldest_key = min(self.mask_cache.keys())
-                    del self.mask_cache[oldest_key]
+                # Verify fixed-size format
+                if multi_channel_mask.shape[0] != self.num_objects:
+                    raise ValueError(f"Mask has {multi_channel_mask.shape[0]} channels, expected {self.num_objects}")
+                
+                # Ensure dimensions match current frame
+                if multi_channel_mask.shape[1] != self.height or multi_channel_mask.shape[2] != self.width:
+                    print(f"Resizing mask for frame {ti} from {multi_channel_mask.shape[1:]} to ({self.height}, {self.width})")
+                    resized_channels = []
+                    for ch_idx in range(multi_channel_mask.shape[0]):
+                        ch_resized = cv2.resize(multi_channel_mask[ch_idx], (self.width, self.height), interpolation=cv2.INTER_NEAREST)
+                        resized_channels.append(ch_resized)
+                    multi_channel_mask = np.stack(resized_channels, axis=0)
+                
+                result = {
+                    'mask': multi_channel_mask,
+                    'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping: channel i-1 = object ID i
+                }
+                
+                # Cache the result if enabled
+                if self.enable_mask_cache and self.mask_cache is not None:
+                    self.mask_cache[ti] = result
                     
-            return mask_array
+                    # Clean up cache if too large
+                    if len(self.mask_cache) > self.cache_size_limit:
+                        oldest_key = min(self.mask_cache.keys())
+                        del self.mask_cache[oldest_key]
+                        
+                return result
+            except Exception as e:
+                print(f"Error loading multi-channel mask for frame {ti}: {str(e)}")
+        
         return None
 
-    def create_combined_mask_from_probabilities(self, ti: int, prob: np.ndarray, tracked_objects: set, save_all_visible: bool = True) -> np.ndarray:
-        """Create combined mask directly from probability tensor without I/O"""
+    def create_combined_mask_from_probabilities(self, ti: int, prob: np.ndarray, tracked_objects: set, save_all_visible: bool = True) -> Dict:
+        """Create fixed-size multi-channel combined mask directly from probability tensor without I/O
+        
+        Returns fixed-size mask (num_objects, H, W) where channel i-1 = object ID i.
+        
+        Returns:
+            dict with 'mask' (num_objects*H*W float32) and 'object_ids' (list 1..num_objects) keys
+        """
         if prob is None:
             print(f"Warning: No probabilities provided for frame {ti}")
-            return np.zeros((self.height, self.width), dtype=np.uint8)
+            return {
+                'mask': np.zeros((self.num_objects, self.height, self.width), dtype=np.float32),
+                'object_ids': list(range(1, self.num_objects + 1))
+            }
             
         # Convert probability tensor to numpy
         prob_np = prob.cpu().numpy() if hasattr(prob, 'cpu') else prob
-        print(f"Creating combined mask for frame {ti}, prob shape: {prob_np.shape}, tracked objects: {tracked_objects}")
+        print(f"Creating fixed-size multi-channel mask for frame {ti}, prob shape: {prob_np.shape}, tracked objects: {tracked_objects}")
         
-        # Create combined mask
-        combined_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        # Create fixed-size multi-channel mask: (num_objects, H, W)
+        # Channel i-1 always corresponds to object ID i
+        multi_channel_mask = np.zeros((self.num_objects, self.height, self.width), dtype=np.float32)
         
-        # First, add tracked objects from current probabilities (PRIORITY 1)
+        # Fill channels with masks from tracked objects (current probabilities) - PRIORITY 1
         tracked_objects_added_from_prob = 0
-        for obj_id in range(1, prob_np.shape[0]):
+        for obj_id in range(1, min(prob_np.shape[0], self.num_objects + 1)):
             if obj_id in tracked_objects:
-                obj_mask = (prob_np[obj_id] > 0.5).astype(np.uint8)
-                if np.any(obj_mask > 0):
-                    combined_mask[obj_mask > 0] = obj_id
-                    print(f"Added tracked object {obj_id} from current probabilities for frame {ti} (pixels: {np.sum(obj_mask > 0)})")
+                channel_idx = obj_id - 1
+                obj_mask = (prob_np[obj_id] > 0.5)
+                if np.any(obj_mask):
+                    # Use current probability mask for tracked objects
+                    multi_channel_mask[channel_idx] = prob_np[obj_id].astype(np.float32)
+                    print(f"Added tracked object {obj_id} from current probabilities (channel {channel_idx}), pixels: {np.sum(obj_mask)}")
                     tracked_objects_added_from_prob += 1
-                else:
-                    print(f"Tracked object {obj_id} has no pixels above threshold in current probabilities for frame {ti}")
         
         print(f"Added {tracked_objects_added_from_prob} tracked objects from current probabilities for frame {ti}")
         
-        # Then, add existing soft masks for untracked objects if save_all_visible is enabled (PRIORITY 2)
+        # Fill channels with existing soft masks for untracked objects if save_all_visible is enabled - PRIORITY 2
         untracked_objects_added = 0
         if save_all_visible:
-            for obj_id in range(1, 100):  # Check reasonable range of object IDs
+            for obj_id in range(1, self.num_objects + 1):
                 if obj_id not in tracked_objects:  # Only for untracked objects
-                    existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{ti:07d}.png')
-                    if os.path.exists(existing_mask_path):
-                        existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
-                        if existing_mask is not None:
-                            # Add existing mask to combined mask
-                            binary_mask = (existing_mask > 127).astype(np.uint8)
-                            if np.any(binary_mask > 0):
-                                combined_mask[binary_mask > 0] = obj_id
-                                print(f"Added existing soft mask for untracked object {obj_id} to combined mask for frame {ti} (pixels: {np.sum(binary_mask > 0)})")
-                                untracked_objects_added += 1
+                    channel_idx = obj_id - 1
+                    # Only load if channel is still empty (tracked objects take priority)
+                    if not np.any(multi_channel_mask[channel_idx] > 0.5):
+                        existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{ti:07d}.png')
+                        if os.path.exists(existing_mask_path):
+                            existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
+                            if existing_mask is not None:
+                                # Resize if needed
+                                if existing_mask.shape != (self.height, self.width):
+                                    existing_mask = cv2.resize(existing_mask, (self.width, self.height), interpolation=cv2.INTER_NEAREST)
+                                # Convert binary mask to probability (0.0 or 1.0)
+                                binary_mask = (existing_mask > 127).astype(np.float32)
+                                if np.any(binary_mask > 0.5):
+                                    multi_channel_mask[channel_idx] = binary_mask
+                                    print(f"Added existing soft mask for untracked object {obj_id} (channel {channel_idx}), pixels: {np.sum(binary_mask > 0.5)}")
+                                    untracked_objects_added += 1
             
-            print(f"Added {untracked_objects_added} untracked objects with existing masks to combined mask for frame {ti}")
+            print(f"Added {untracked_objects_added} untracked objects with existing masks for frame {ti}")
         
-        print(f"Final combined mask for frame {ti}: shape {combined_mask.shape}, max value {combined_mask.max()}, total non-zero pixels {np.sum(combined_mask > 0)}")
+        total_non_zero = np.sum(multi_channel_mask > 0.5)
+        print(f"Final fixed-size multi-channel mask for frame {ti}: shape {multi_channel_mask.shape}, total non-zero pixels: {total_non_zero}")
+        
+        result = {
+            'mask': multi_channel_mask,
+            'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping: channel i-1 = object ID i
+        }
         
         # Cache the result if enabled
         if self.enable_mask_cache and self.mask_cache is not None:
-            self.mask_cache[ti] = combined_mask.copy()
+            self.mask_cache[ti] = result
             
             # Clean up cache if too large
             if len(self.mask_cache) > self.cache_size_limit:
                 oldest_key = min(self.mask_cache.keys())
                 del self.mask_cache[oldest_key]
                 
-        return combined_mask
+        return result
 
     def _get_image_unbuffered(self, ti: int):
         # returns H*W*3 uint8 array
@@ -524,14 +647,33 @@ class ResourceManager:
         image = np.array(image)
         return image
 
-    def _get_mask_unbuffered(self, ti: int):
-        # returns H*W uint8 array
+    def _get_mask_unbuffered(self, ti: int, tracked_objects: set = None):
+        """Get mask from masks folder for inference (ONLY tracked objects)
+        
+        Returns single-channel mask (H*W) with ONLY tracked objects.
+        Untracked objects are 0 (background).
+        
+        Args:
+            ti: Frame index
+            tracked_objects: Set of object IDs to filter. If None, returns all objects from file.
+        
+        Returns:
+            H*W uint8 array with object IDs, or None if not found
+        """
         assert 0 <= ti < self.length
 
         mask_path = path.join(self.mask_dir, self.names[ti] + '.png')
         if path.exists(mask_path):
             mask = Image.open(mask_path)
             mask = np.array(mask)
+            
+            # Filter to only tracked objects if specified
+            if tracked_objects is not None:
+                filtered_mask = np.zeros_like(mask)
+                for obj_id in tracked_objects:
+                    filtered_mask[mask == obj_id] = obj_id
+                mask = filtered_mask
+            
             return mask
         else:
             return None
@@ -574,7 +716,7 @@ class ResourceManager:
 
     def invalidate(self, ti: int):
         # the image buffer is never invalidated
-        self.get_mask.invalidate((ti, ))
+        # Note: get_mask is now a direct function call (not LRU cached), so no need to invalidate
         # Also invalidate cached masks if cache is enabled
         if self.enable_mask_cache:
             if self.mask_cache is not None and ti in self.mask_cache:
