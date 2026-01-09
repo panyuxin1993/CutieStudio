@@ -262,7 +262,11 @@ class MainController():
                 raise NotImplementedError
 
     def load_current_image_mask(self, no_mask: bool = False):
-        """Load the current frame's image and mask"""
+        """Load the current frame's image and mask for inference
+        
+        First tries to load from masks folder. If not found, loads from all_masks
+        and extracts tracked object channels to generate inference mask.
+        """
         print(f"Loading current image mask for frame {self.curr_ti}")
         try:
             self.curr_image_np = self.res_man.get_image(self.curr_ti)
@@ -270,23 +274,48 @@ class MainController():
             self.curr_image_torch = None
 
             if not no_mask:
-                loaded_mask = self.res_man.get_all_masks(self.curr_ti)
-                if loaded_mask is None:
-                    print("No mask found, using empty mask")
-                    self.curr_mask.fill(0)
+                # First try to load from masks folder (for inference) - only tracked objects
+                loaded_mask = self.res_man.get_mask(self.curr_ti, tracked_objects=self.tracked_objects)
+                if loaded_mask is not None:
+                    print("Loaded existing mask from masks folder (tracked objects only)")
+                    # Filter to only tracked objects (should already be filtered, but double-check)
+                    filtered_mask = np.zeros_like(loaded_mask)
+                    for obj_id in self.tracked_objects:
+                        filtered_mask[loaded_mask == obj_id] = obj_id
+                    self.curr_mask = filtered_mask
+                    self.curr_prob = None
                 else:
-                    print("Loaded existing mask")
-                    # # Get unique object IDs and remap them to sequential indices
-                    # unique_ids = np.unique(loaded_mask)
-                    # object_ids = [id for id in unique_ids if id > 0]
-                    # id_map = {id: idx+1 for idx, id in enumerate(object_ids)}  # 0 stays 0 (background)
-                    # remapped_mask = np.zeros_like(loaded_mask)
-                    # for orig_id, new_id in id_map.items():
-                    #     remapped_mask[loaded_mask == orig_id] = new_id
-                    # print(f"Remapped object IDs: {id_map}")
-                    # self.curr_mask = remapped_mask
-                    self.curr_mask = loaded_mask.copy()
-                self.curr_prob = None
+                    # No mask in masks folder, try loading from all_masks and extract tracked objects
+                    print("No mask found in masks folder, trying to load from all_masks...")
+                    all_masks_data = self.res_man.get_all_masks(self.curr_ti)
+                    if all_masks_data is not None:
+                        multi_channel_mask = all_masks_data['mask']  # (num_objects, H, W)
+                        print(f"Loaded all_masks for frame {self.curr_ti}, shape: {multi_channel_mask.shape}")
+                        
+                        # Extract tracked objects from multi-channel mask and convert to single-channel format
+                        # Channel i-1 corresponds to object ID i
+                        inference_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+                        
+                        # Process tracked objects in sorted order (later objects overwrite earlier ones in overlaps)
+                        for obj_id in sorted(self.tracked_objects):
+                            if 1 <= obj_id <= self.num_objects:
+                                channel_idx = obj_id - 1
+                                if channel_idx < multi_channel_mask.shape[0]:
+                                    # Get binary mask for this object
+                                    binary_mask = (multi_channel_mask[channel_idx] > 0.5).astype(np.uint8)
+                                    # Set object ID in inference mask (overwrites previous objects in overlaps)
+                                    inference_mask[binary_mask > 0] = obj_id
+                                    num_pixels = np.sum(binary_mask > 0)
+                                    if num_pixels > 0:
+                                        print(f"  Extracted object {obj_id} (channel {channel_idx}) from all_masks: {num_pixels} pixels")
+                        
+                        self.curr_mask = inference_mask
+                        self.curr_prob = None
+                        print(f"Generated inference mask from all_masks: {len(self.tracked_objects)} tracked objects, {np.sum(inference_mask > 0)} non-zero pixels")
+                    else:
+                        print("No mask found in all_masks folder either, using empty mask")
+                        self.curr_mask.fill(0)
+                        self.curr_prob = None
         except Exception as e:
             print(f"Error loading frame {self.curr_ti}: {str(e)}")
             raise
@@ -321,36 +350,131 @@ class MainController():
             raise
 
     def compose_current_im(self):
-        # Prioritize current in-memory probabilities over disk-based combined masks
-        if self.curr_prob is not None:
-            # Create combined mask from current probabilities first
-            print(f"Creating combined mask for frame {self.curr_ti} with tracked objects: {self.tracked_objects}")
-            print(f"Current probabilities shape: {self.curr_prob.shape}")
-            combined_mask = self.res_man.create_combined_mask_from_probabilities(
-                self.curr_ti, self.curr_prob, self.tracked_objects, self.save_all_visible
-            )
-            print(f"Created combined mask with shape: {combined_mask.shape}, max value: {combined_mask.max()}")
+        """Compose current image with masks from all_masks folder
+        
+        Loads multi-channel masks from all_masks folder and overlays each visible object
+        one by one. Later objects overwrite earlier ones in overlapping areas.
+        Also loads soft masks for visible objects that aren't in all_masks yet.
+        """
+        # Always load from all_masks folder (multi-channel format)
+        loaded_mask_data = self.res_man.get_all_masks(self.curr_ti)
+        
+        # Get multi-channel mask data (fixed size: num_objects channels)
+        if loaded_mask_data is None:
+            # No mask data available in all_masks, start with empty fixed-size structure
+            print(f"No mask data found in all_masks for frame {self.curr_ti}, will load from soft masks if available")
+            # Fixed-size mask: channel i-1 = object ID i
+            multi_channel_mask = np.zeros((self.num_objects, self.h, self.w), dtype=np.float32)
+            object_ids = list(range(1, self.num_objects + 1))  # Fixed mapping
         else:
-            # Fallback to disk-based combined mask if no current probabilities
-            combined_mask = self.res_man.get_all_masks(self.curr_ti)
-            if combined_mask is None:
-                # If no combined mask exists, create an empty mask
-                print(f"No combined mask found and no probabilities available for frame {self.curr_ti}")
-                combined_mask = np.zeros((self.h, self.w), dtype=np.uint8)
-            else:
-                print(f"Using disk-based combined mask for frame {self.curr_ti}")
+            # Extract multi-channel mask (fixed size: num_objects channels)
+            multi_channel_mask = loaded_mask_data['mask']  # (num_objects, H, W)
+            object_ids = loaded_mask_data['object_ids']  # [1, 2, ..., num_objects]
+            print(f"Loaded all_masks for frame {self.curr_ti}: shape {multi_channel_mask.shape}, expected {self.num_objects} channels")
             
-        # Only show masks for visible objects
-        visible_mask = combined_mask.copy()
-        for obj_id in range(1, self.num_objects + 1):
-            if obj_id not in self.visible_objects:
-                visible_mask[visible_mask == obj_id] = 0
-                
-        print(f"Visible objects: {self.visible_objects}, visible mask max value: {visible_mask.max()}")
+            # Verify fixed-size format
+            if multi_channel_mask.shape[0] != self.num_objects:
+                raise ValueError(f"Mask has {multi_channel_mask.shape[0]} channels, expected {self.num_objects}")
+            
+            # Ensure we have the correct dimensions
+            _, h_mask, w_mask = multi_channel_mask.shape
+            if h_mask != self.h or w_mask != self.w:
+                print(f"Warning: Mask dimensions mismatch. Expected ({self.h}, {self.w}), got ({h_mask}, {w_mask}). Resizing...")
+                # Resize all channels
+                resized_channels = []
+                for ch_idx in range(multi_channel_mask.shape[0]):
+                    ch_resized = cv2.resize(multi_channel_mask[ch_idx], (self.w, self.h), interpolation=cv2.INTER_NEAREST)
+                    resized_channels.append(ch_resized)
+                multi_channel_mask = np.stack(resized_channels, axis=0)
+        
+        # Update with current probabilities for tracked objects if available
+        # Fixed mapping: channel i-1 = object ID i
+        if self.curr_prob is not None:
+            prob_np = self.curr_prob.cpu().numpy() if hasattr(self.curr_prob, 'cpu') else self.curr_prob
+            
+            # For each tracked object, update its channel in the multi-channel mask
+            for obj_id in range(1, min(prob_np.shape[0], self.num_objects + 1)):
+                if obj_id in self.tracked_objects:
+                    channel_idx = obj_id - 1  # Fixed mapping: channel i-1 = object ID i
+                    # Update channel with current probability (overwrites existing mask)
+                    multi_channel_mask[channel_idx] = prob_np[obj_id].astype(np.float32)
+        
+        # Load soft masks for visible objects that aren't already loaded or don't have current probabilities
+        # Fixed mapping: channel i-1 = object ID i
+        for obj_id in self.visible_objects:
+            if 1 <= obj_id <= self.num_objects:
+                channel_idx = obj_id - 1
+                # Only load from soft mask if channel is empty (tracked objects with current prob take priority)
+                if not np.any(multi_channel_mask[channel_idx] > 0.5):
+                    # Check if soft mask exists for this object
+                    soft_mask_path = os.path.join(self.res_man.soft_mask_dir, f'{obj_id}', f'{self.curr_ti:07d}.png')
+                    print(f"Checking for soft mask: {soft_mask_path} (exists: {os.path.exists(soft_mask_path)})")
+                    if os.path.exists(soft_mask_path):
+                        soft_mask = cv2.imread(soft_mask_path, cv2.IMREAD_GRAYSCALE)
+                        if soft_mask is not None:
+                            print(f"Loaded soft mask for object {obj_id}, shape: {soft_mask.shape}, expected: ({self.h}, {self.w})")
+                            # Resize if needed
+                            if soft_mask.shape != (self.h, self.w):
+                                print(f"Resizing soft mask from {soft_mask.shape} to ({self.h}, {self.w})")
+                                soft_mask = cv2.resize(soft_mask, (self.w, self.h), interpolation=cv2.INTER_NEAREST)
+                            
+                            # Convert binary mask to probability (0.0 or 1.0)
+                            mask_prob = (soft_mask > 127).astype(np.float32)
+                            num_pixels = np.sum(mask_prob > 0.5)
+                            
+                            # Update the fixed channel (channel i-1 = object ID i)
+                            multi_channel_mask[channel_idx] = mask_prob
+                            
+                            print(f"Added object {obj_id} to visualization mask (channel {channel_idx}), {num_pixels} pixels")
+                        else:
+                            print(f"Failed to read soft mask for object {obj_id} - cv2.imread returned None")
+                    else:
+                        print(f"Soft mask not found for object {obj_id} at frame {self.curr_ti}: {soft_mask_path}")
+                        # Also check if soft_mask_dir exists
+                        if not os.path.exists(self.res_man.soft_mask_dir):
+                            print(f"  ERROR: soft_mask_dir does not exist: {self.res_man.soft_mask_dir}")
+                        elif not os.path.exists(os.path.dirname(soft_mask_path)):
+                            print(f"  ERROR: Object directory does not exist: {os.path.dirname(soft_mask_path)}")
+                        else:
+                            # List available files in the object directory to help debug
+                            obj_dir = os.path.dirname(soft_mask_path)
+                            if os.path.exists(obj_dir):
+                                available_files = sorted(os.listdir(obj_dir))
+                                print(f"  Available files in {obj_dir}: {available_files[:10]}...")  # Show first 10 files
+        
+        # Create visualization mask by overlaying visible objects one by one
+        # Start with empty mask
+        vis_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+        
+        # Sort visible objects to ensure consistent ordering (later objects overwrite earlier ones)
+        # Fixed mapping: channel i-1 = object ID i, so we just iterate through visible objects
+        visible_object_ids = sorted([obj_id for obj_id in self.visible_objects if 1 <= obj_id <= self.num_objects])
+        
+        print(f"Composing visualization for frame {self.curr_ti}:")
+        print(f"  - Fixed-size mask: {self.num_objects} channels (channel i-1 = object ID i)")
+        print(f"  - Visible objects: {len(visible_object_ids)} ({visible_object_ids})")
+        print(f"  - Multi-channel mask shape: {multi_channel_mask.shape}")
+        
+        # Overlay each visible object's mask one by one
+        # Later objects will overwrite earlier ones in overlapping areas
+        # Fixed mapping: channel i-1 = object ID i
+        for obj_id in visible_object_ids:
+            channel_idx = obj_id - 1  # Fixed mapping
+            if channel_idx < multi_channel_mask.shape[0]:
+                # Get binary mask for this object
+                binary_mask = (multi_channel_mask[channel_idx] > 0.5).astype(np.uint8)
+                num_pixels = np.sum(binary_mask > 0)
+                print(f"  - Object {obj_id} (channel {channel_idx}): {num_pixels} pixels")
+                # Overwrite: later objects overwrite earlier ones
+                vis_mask[binary_mask > 0] = obj_id
+            else:
+                print(f"  - WARNING: Object {obj_id} channel {channel_idx} out of range (mask shape: {multi_channel_mask.shape})")
+        
+        print(f"Final visualization mask - max value: {vis_mask.max()}, non-zero pixels: {np.sum(vis_mask > 0)}")
                 
         # Use visible_objects for basic visualization, vis_target_objects for popup/layer modes
-        target_objects = self.vis_target_objects if self.vis_mode in ['popup', 'layer'] else list(self.visible_objects)
-        self.vis_image = get_visualization(self.vis_mode, self.curr_image_np, visible_mask,
+        target_objects = self.vis_target_objects if self.vis_mode in ['popup', 'layer'] else visible_object_ids
+        self.vis_image = get_visualization(self.vis_mode, self.curr_image_np, vis_mask,
                                            self.overlay_layer, target_objects)
 
     def update_canvas(self):
@@ -427,8 +551,13 @@ class MainController():
         self.show_current_frame()
 
     def save_current_mask(self):
-        # Save inference masks in masks folder
-        self.res_man.save_mask(self.curr_ti, self.curr_mask)
+        """Save inference masks to masks folder (ONLY tracked objects)
+        
+        IMPORTANT: Only tracked objects are saved to prevent untracked objects
+        from interfering with inference. Untracked objects are excluded.
+        """
+        # Save to masks folder with ONLY tracked objects
+        self.res_man.save_mask(self.curr_ti, self.curr_mask, tracked_objects=self.tracked_objects)
 
     def on_slider_update(self):
         """Handle timeline slider updates"""
@@ -680,6 +809,11 @@ class MainController():
         self.propagating = False
 
     def on_commit(self):
+        """Commit current frame to permanent memory (ONLY tracked objects)
+        
+        IMPORTANT: Only tracked objects are committed to prevent untracked objects
+        from interfering with future inference.
+        """
         if self.interacted_prob is None:
             # get mask from disk
             self.load_current_image_mask()
@@ -690,9 +824,16 @@ class MainController():
 
         with autocast(self.device, enabled=(self.amp and self.device == 'cuda')):
             self.convert_current_image_mask_torch()
-            self.gui.text(f'Permanent memory saved at {self.curr_ti}.')
+            
+            # Filter to only tracked objects before committing
+            tracked_prob = self.curr_prob.clone()
+            for obj_id in range(1, self.num_objects + 1):
+                if obj_id not in self.tracked_objects:
+                    tracked_prob[obj_id] = 0
+            
+            self.gui.text(f'Permanent memory saved at {self.curr_ti} (tracked objects only).')
             self.curr_prob = self.processor.step(self.curr_image_torch,
-                                                 self.curr_prob[1:],
+                                                 tracked_prob[1:],
                                                  idx_mask=False,
                                                  force_permanent=True)
             self.update_memory_gauges()
