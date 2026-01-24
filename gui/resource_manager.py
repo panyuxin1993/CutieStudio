@@ -252,7 +252,8 @@ class ResourceManager:
             
             # Create fixed-size multi-channel mask: (num_objects, H, W)
             # Channel i-1 corresponds to object ID i
-            multi_channel_mask = np.zeros((self.num_objects, h, w), dtype=np.float32)
+            # Use uint8 (0 or 1) instead of float32 to reduce file size by 4x
+            multi_channel_mask = np.zeros((self.num_objects, h, w), dtype=np.uint8)
             
             # Fill channels with masks from tracked objects (current probabilities)
             for obj_id in range(1, self.num_objects + 1):
@@ -264,7 +265,8 @@ class ResourceManager:
                     # Resize if dimensions don't match
                     if mask_array.shape != (h, w):
                         mask_array = cv2.resize(mask_array, (w, h), interpolation=cv2.INTER_LINEAR)
-                    multi_channel_mask[channel_idx] = mask_array.astype(np.float32)
+                    # Convert probability to binary (0 or 1)
+                    multi_channel_mask[channel_idx] = (mask_array > 0.5).astype(np.uint8)
                 elif save_all_visible or obj_id in tracked_objects:
                     # Load from existing soft mask for untracked objects (if save_all_visible) or tracked objects without current prob
                     existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
@@ -274,22 +276,23 @@ class ResourceManager:
                             # Resize if dimensions don't match
                             if existing_mask.shape != (h, w):
                                 existing_mask = cv2.resize(existing_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-                            # Convert binary mask to probability (0.0 or 1.0)
-                            multi_channel_mask[channel_idx] = (existing_mask > 127).astype(np.float32)
+                            # Convert binary mask to uint8 (0 or 1)
+                            multi_channel_mask[channel_idx] = (existing_mask > 127).astype(np.uint8)
             
-            # Save multi-channel mask as .npy file (fixed size: num_objects channels)
-            npy_path = os.path.join(self.all_masks_dir, f'{frame_idx:07d}.npy')
-            np.save(npy_path, multi_channel_mask)
+            # Save multi-channel mask as compressed .npz file (much smaller than .npy)
+            npz_path = os.path.join(self.all_masks_dir, f'{frame_idx:07d}.npz')
+            np.savez_compressed(npz_path, mask=multi_channel_mask)
             
             # Count how many objects have non-zero masks
-            non_empty_channels = np.sum([np.any(multi_channel_mask[i] > 0.5) for i in range(self.num_objects)])
-            print(f"Saved all_masks for frame {frame_idx}: {non_empty_channels}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape})")
+            non_empty_channels = np.sum([np.any(multi_channel_mask[i] > 0) for i in range(self.num_objects)])
+            file_size = os.path.getsize(npz_path) / 1024  # Size in KB
+            print(f"Saved all_masks for frame {frame_idx}: {non_empty_channels}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape}, dtype: {multi_channel_mask.dtype}, size: {file_size:.1f} KB)")
             
-            # Cache the multi-channel mask if enabled
+            # Cache the multi-channel mask if enabled (store as uint8 to save memory)
             if self.enable_mask_cache and self.mask_cache is not None:
                 # Store with implicit object IDs (channel i-1 = object ID i)
                 self.mask_cache[frame_idx] = {
-                    'mask': multi_channel_mask.copy(),
+                    'mask': multi_channel_mask.copy(),  # Already uint8
                     'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping
                 }
                 
@@ -463,13 +466,15 @@ class ResourceManager:
         """Combine all available masks from soft_masks into fixed-size multi-channel format in all_masks
         
         Creates fixed-size mask (num_objects, H, W) where channel i-1 = object ID i.
+        Uses uint8 binary format (0 or 1) to reduce file size by 4x compared to float32.
         No need for _ids.npy file since the mapping is fixed.
         """
         print(f"Updating all_masks for frame {ti}")
         
         # Create fixed-size multi-channel mask: (num_objects, H, W)
         # Channel i-1 always corresponds to object ID i
-        multi_channel_mask = np.zeros((self.num_objects, self.height, self.width), dtype=np.float32)
+        # Use uint8 (0 or 1) instead of float32 to reduce file size by 4x
+        multi_channel_mask = np.zeros((self.num_objects, self.height, self.width), dtype=np.uint8)
         
         # Load masks from all objects into their corresponding channels
         objects_with_masks = 0
@@ -482,21 +487,23 @@ class ResourceManager:
                     # Resize if dimensions don't match
                     if mask.shape != (self.height, self.width):
                         mask = cv2.resize(mask, (self.width, self.height), interpolation=cv2.INTER_NEAREST)
-                    # Convert binary mask to probability (0.0 or 1.0)
-                    multi_channel_mask[channel_idx] = (mask > 127).astype(np.float32)
-                    if np.any(multi_channel_mask[channel_idx] > 0.5):
+                    # Convert binary mask to uint8 (0 or 1)
+                    multi_channel_mask[channel_idx] = (mask > 127).astype(np.uint8)
+                    if np.any(multi_channel_mask[channel_idx] > 0):
                         objects_with_masks += 1
         
-        # Save multi-channel mask as .npy file (fixed size: num_objects channels)
-        npy_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npy')
-        np.save(npy_path, multi_channel_mask)
+        # Save multi-channel mask as compressed .npz file (much smaller than .npy)
+        # Use compression to achieve similar size to individual PNG soft masks
+        npz_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npz')
+        np.savez_compressed(npz_path, mask=multi_channel_mask)
         
-        print(f"Saved fixed-size multi-channel mask to {npy_path}: {objects_with_masks}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape})")
+        file_size = os.path.getsize(npz_path) / 1024  # Size in KB
+        print(f"Saved compressed multi-channel mask to {npz_path}: {objects_with_masks}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape}, dtype: {multi_channel_mask.dtype}, size: {file_size:.1f} KB)")
         
-        # Update cache if enabled
+        # Update cache if enabled (store as uint8 to save memory)
         if self.enable_mask_cache and self.mask_cache is not None:
             self.mask_cache[ti] = {
-                'mask': multi_channel_mask.copy(),
+                'mask': multi_channel_mask.copy(),  # Already uint8
                 'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping
             }
             
@@ -509,55 +516,86 @@ class ResourceManager:
         """Get the combined mask from all_masks directory or cache
         
         Returns fixed-size multi-channel mask (num_objects, H, W) where channel i-1 = object ID i.
+        Uses uint8 binary format (0 or 1) for storage efficiency.
+        Converts to float32 for compatibility with existing code.
         No need for _ids.npy file since the mapping is fixed.
         
         Returns:
-            dict with 'mask' (num_objects*H*W) and 'object_ids' (list 1..num_objects) keys
+            dict with 'mask' (num_objects*H*W float32) and 'object_ids' (list 1..num_objects) keys
             None if no mask exists
         """
         # Check cache first if enabled
         if self.enable_mask_cache and self.mask_cache is not None and ti in self.mask_cache:
-            return self.mask_cache[ti]
+            cached_result = self.mask_cache[ti].copy()
+            # Convert uint8 to float32 for compatibility
+            cached_result['mask'] = cached_result['mask'].astype(np.float32)
+            return cached_result
             
-        # Load fixed-size multi-channel format (.npy)
+        # Load fixed-size multi-channel format (.npz compressed or .npy for backward compatibility)
+        npz_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npz')
         npy_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npy')
         
-        if os.path.exists(npy_path):
+        # Try .npz first (new compressed format), then .npy (old format)
+        if os.path.exists(npz_path):
+            try:
+                loaded_data = np.load(npz_path)
+                multi_channel_mask = loaded_data['mask']
+            except Exception as e:
+                print(f"Error loading compressed mask for frame {ti}: {str(e)}")
+                return None
+        elif os.path.exists(npy_path):
+            # Backward compatibility: load old .npy format
             try:
                 multi_channel_mask = np.load(npy_path)
                 
-                # Verify fixed-size format
-                if multi_channel_mask.shape[0] != self.num_objects:
-                    raise ValueError(f"Mask has {multi_channel_mask.shape[0]} channels, expected {self.num_objects}")
-                
-                # Ensure dimensions match current frame
-                if multi_channel_mask.shape[1] != self.height or multi_channel_mask.shape[2] != self.width:
-                    print(f"Resizing mask for frame {ti} from {multi_channel_mask.shape[1:]} to ({self.height}, {self.width})")
-                    resized_channels = []
-                    for ch_idx in range(multi_channel_mask.shape[0]):
-                        ch_resized = cv2.resize(multi_channel_mask[ch_idx], (self.width, self.height), interpolation=cv2.INTER_NEAREST)
-                        resized_channels.append(ch_resized)
-                    multi_channel_mask = np.stack(resized_channels, axis=0)
-                
-                result = {
-                    'mask': multi_channel_mask,
-                    'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping: channel i-1 = object ID i
+                # Verify it's uint8 format (new format)
+                if multi_channel_mask.dtype != np.uint8:
+                    raise ValueError(f"Mask file {npy_path} is in old float32 format. Please run the migration script to convert it to uint8 format.")
+            except Exception as e:
+                print(f"Error loading old format mask for frame {ti}: {str(e)}")
+                return None
+        else:
+            return None
+        
+        # Common processing for both .npz and .npy formats
+        try:
+            # Verify fixed-size format
+            if multi_channel_mask.shape[0] != self.num_objects:
+                raise ValueError(f"Mask has {multi_channel_mask.shape[0]} channels, expected {self.num_objects}")
+            
+            # Ensure dimensions match current frame
+            if multi_channel_mask.shape[1] != self.height or multi_channel_mask.shape[2] != self.width:
+                print(f"Resizing mask for frame {ti} from {multi_channel_mask.shape[1:]} to ({self.height}, {self.width})")
+                resized_channels = []
+                for ch_idx in range(multi_channel_mask.shape[0]):
+                    ch_resized = cv2.resize(multi_channel_mask[ch_idx], (self.width, self.height), interpolation=cv2.INTER_NEAREST)
+                    resized_channels.append(ch_resized)
+                multi_channel_mask = np.stack(resized_channels, axis=0)
+            
+            # Convert uint8 to float32 for compatibility with existing code
+            multi_channel_mask_float = multi_channel_mask.astype(np.float32)
+            
+            result = {
+                'mask': multi_channel_mask_float,  # float32 for compatibility
+                'object_ids': list(range(1, self.num_objects + 1))  # Fixed mapping: channel i-1 = object ID i
+            }
+            
+            # Cache the result if enabled (store as uint8 to save memory)
+            if self.enable_mask_cache and self.mask_cache is not None:
+                self.mask_cache[ti] = {
+                    'mask': multi_channel_mask,  # uint8 for memory efficiency
+                    'object_ids': list(range(1, self.num_objects + 1))
                 }
                 
-                # Cache the result if enabled
-                if self.enable_mask_cache and self.mask_cache is not None:
-                    self.mask_cache[ti] = result
+                # Clean up cache if too large
+                if len(self.mask_cache) > self.cache_size_limit:
+                    oldest_key = min(self.mask_cache.keys())
+                    del self.mask_cache[oldest_key]
                     
-                    # Clean up cache if too large
-                    if len(self.mask_cache) > self.cache_size_limit:
-                        oldest_key = min(self.mask_cache.keys())
-                        del self.mask_cache[oldest_key]
-                        
-                return result
-            except Exception as e:
-                print(f"Error loading multi-channel mask for frame {ti}: {str(e)}")
-        
-        return None
+            return result
+        except Exception as e:
+            print(f"Error processing multi-channel mask for frame {ti}: {str(e)}")
+            return None
 
     def create_combined_mask_from_probabilities(self, ti: int, prob: np.ndarray, tracked_objects: set, save_all_visible: bool = True) -> Dict:
         """Create fixed-size multi-channel combined mask directly from probability tensor without I/O

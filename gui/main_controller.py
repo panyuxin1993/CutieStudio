@@ -151,6 +151,13 @@ class MainController():
         # the object id used for popup/layer overlay
         self.vis_target_objects = list(range(1, self.num_objects + 1))
 
+        # Zoom and pan state
+        self.zoom_factor = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.is_panning = False
+        self.last_pan_pos = None
+
         print("Loading initial frame...")
         self.load_current_image_mask()
         self.convert_current_image_mask_torch()
@@ -261,21 +268,27 @@ class MainController():
             else:
                 raise NotImplementedError
 
-    def load_current_image_mask(self, no_mask: bool = False):
+    def load_current_image_mask(self, no_mask: bool = False, force_from_all_masks: bool = False):
         """Load the current frame's image and mask for inference
         
         First tries to load from masks folder. If not found, loads from all_masks
         and extracts tracked object channels to generate inference mask.
+        
+        When force_from_all_masks is True, skips masks folder and loads from all_masks
+        (or soft masks) only. Use this when masks folder is incomplete (e.g. only
+        some objects after modifying tracking).
         """
-        print(f"Loading current image mask for frame {self.curr_ti}")
+        print(f"Loading current image mask for frame {self.curr_ti}" + (" (force from all_masks)" if force_from_all_masks else ""))
         try:
             self.curr_image_np = self.res_man.get_image(self.curr_ti)
             print(f"Loaded image shape: {self.curr_image_np.shape}")
             self.curr_image_torch = None
 
             if not no_mask:
-                # First try to load from masks folder (for inference) - only tracked objects
-                loaded_mask = self.res_man.get_mask(self.curr_ti, tracked_objects=self.tracked_objects)
+                # Skip masks folder when force_from_all_masks (masks folder may be incomplete)
+                loaded_mask = None
+                if not force_from_all_masks:
+                    loaded_mask = self.res_man.get_mask(self.curr_ti, tracked_objects=self.tracked_objects)
                 if loaded_mask is not None:
                     print("Loaded existing mask from masks folder (tracked objects only)")
                     # Filter to only tracked objects (should already be filtered, but double-check)
@@ -313,9 +326,26 @@ class MainController():
                         self.curr_prob = None
                         print(f"Generated inference mask from all_masks: {len(self.tracked_objects)} tracked objects, {np.sum(inference_mask > 0)} non-zero pixels")
                     else:
-                        print("No mask found in all_masks folder either, using empty mask")
-                        self.curr_mask.fill(0)
-                        self.curr_prob = None
+                        # all_masks missing; build from individual soft masks if force_from_all_masks
+                        if force_from_all_masks:
+                            inference_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+                            for obj_id in sorted(self.tracked_objects):
+                                if 1 <= obj_id <= self.num_objects:
+                                    p = os.path.join(self.res_man.soft_mask_dir, f'{obj_id}', f'{self.curr_ti:07d}.png')
+                                    if os.path.exists(p):
+                                        m = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+                                        if m is not None:
+                                            if m.shape != (self.h, self.w):
+                                                m = cv2.resize(m, (self.w, self.h), interpolation=cv2.INTER_NEAREST)
+                                            binary = (m > 127).astype(np.uint8)
+                                            inference_mask[binary > 0] = obj_id
+                            self.curr_mask = inference_mask
+                            self.curr_prob = None
+                            print(f"Built inference mask from soft_masks: {len(self.tracked_objects)} tracked, {np.sum(inference_mask > 0)} non-zero pixels")
+                        else:
+                            print("No mask found in all_masks folder either, using empty mask")
+                            self.curr_mask.fill(0)
+                            self.curr_prob = None
         except Exception as e:
             print(f"Error loading frame {self.curr_ti}: {str(e)}")
             raise
@@ -1139,6 +1169,123 @@ class MainController():
         self.last_ex = x
         self.last_ey = y
 
+    def on_wheel_event(self, event):
+        """Handle mouse wheel events for zooming"""
+        # Check if image is loaded
+        if not hasattr(self.gui, 'image_size') or self.gui.image_size is None:
+            event.accept()
+            return
+        
+        # Get mouse position relative to canvas
+        mouse_pos = event.position()
+        
+        # Calculate zoom factor change
+        zoom_delta = 0.1
+        if event.angleDelta().y() > 0:
+            # Zoom in
+            new_zoom = min(self.zoom_factor + zoom_delta, 5.0)  # Max 5x zoom
+        else:
+            # Zoom out
+            new_zoom = max(self.zoom_factor - zoom_delta, 1.0)  # Min 1x zoom (no zoom out)
+        
+        if new_zoom != self.zoom_factor:
+            # Calculate zoom center in image coordinates
+            canvas_size = self.gui.main_canvas.size()
+            img_size = self.gui.image_size
+            
+            # Calculate base scale
+            scale_w = canvas_size.width() / img_size.width()
+            scale_h = canvas_size.height() / img_size.height()
+            base_scale = min(scale_w, scale_h)
+            
+            # Current scaled image size
+            current_scaled_w = img_size.width() * base_scale * self.zoom_factor
+            current_scaled_h = img_size.height() * base_scale * self.zoom_factor
+            
+            # Mouse position relative to canvas center
+            canvas_center_x = canvas_size.width() / 2
+            canvas_center_y = canvas_size.height() / 2
+            mouse_offset_x = mouse_pos.x() - canvas_center_x
+            mouse_offset_y = mouse_pos.y() - canvas_center_y
+            
+            # Adjust pan to zoom towards mouse position
+            zoom_ratio = new_zoom / self.zoom_factor
+            
+            if self.zoom_factor > 1.0:
+                # Adjust pan based on zoom center
+                self.pan_x = (self.pan_x - mouse_offset_x) * zoom_ratio + mouse_offset_x
+                self.pan_y = (self.pan_y - mouse_offset_y) * zoom_ratio + mouse_offset_y
+            else:
+                # Starting to zoom in, initialize pan
+                self.pan_x = -mouse_offset_x * (new_zoom - 1.0)
+                self.pan_y = -mouse_offset_y * (new_zoom - 1.0)
+            
+            self.zoom_factor = new_zoom
+            self.gui._update_canvas_display()
+        
+        event.accept()
+
+    def on_mouse_press_for_pan(self, event):
+        """Handle mouse press for panning"""
+        from PySide6.QtCore import Qt
+        
+        # Handle panning with middle mouse button or Ctrl+Left button
+        if (event.button() == Qt.MouseButton.MiddleButton or 
+            (event.button() == Qt.MouseButton.LeftButton and 
+             event.modifiers() == Qt.KeyboardModifier.ControlModifier)):
+            if self.zoom_factor > 1.0:
+                self.is_panning = True
+                self.last_pan_pos = event.position()
+                return True  # Event handled
+        return False  # Event not handled, let GUI handle it
+
+    def on_mouse_motion_for_pan(self, event):
+        """Handle mouse motion for panning"""
+        if self.is_panning and self.last_pan_pos is not None:
+            current_pos = event.position()
+            dx = current_pos.x() - self.last_pan_pos.x()
+            dy = current_pos.y() - self.last_pan_pos.y()
+            
+            self.pan_x += dx
+            self.pan_y += dy
+            self.last_pan_pos = current_pos
+            
+            self.gui._update_canvas_display()
+            return True  # Event handled
+        return False  # Event not handled
+
+    def on_mouse_release_for_pan(self, event):
+        """Handle mouse release for panning"""
+        if self.is_panning:
+            self.is_panning = False
+            self.last_pan_pos = None
+            return True  # Event handled
+        return False  # Event not handled
+
+    def zoom_in(self):
+        """Zoom in by 0.2x"""
+        new_zoom = min(self.zoom_factor + 0.2, 5.0)
+        if new_zoom != self.zoom_factor:
+            self.zoom_factor = new_zoom
+            self.gui._update_canvas_display()
+
+    def zoom_out(self):
+        """Zoom out by 0.2x"""
+        new_zoom = max(self.zoom_factor - 0.2, 1.0)
+        if new_zoom != self.zoom_factor:
+            self.zoom_factor = new_zoom
+            if self.zoom_factor == 1.0:
+                self.pan_x = 0.0
+                self.pan_y = 0.0
+            self.gui._update_canvas_display()
+
+    def reset_zoom(self):
+        """Reset zoom and pan to default"""
+        self.zoom_factor = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.gui._update_canvas_display()
+
     @property
     def h(self) -> int:
         return self.res_man.h
@@ -1234,79 +1381,44 @@ class MainController():
                     self.gui.text(f'Successfully exported mask metrics to {output_filename} (no new calculations needed)')
             else:
                 self.gui.text(f'Successfully exported mask metrics to {output_filename}')
+
+            # If any pairwise metric checkbox is selected, also export pairwise metrics (.npz)
+            if (self.gui.distance_cb.isChecked() or self.gui.overlap_cb.isChecked() or self.gui.contact_cb.isChecked()):
+                pairwise_output_path = Path(self.cfg['workspace']) / "pairwise_metrics.npz"
+                self.gui.export_mask_metrics_button.setEnabled(False)
+                self.gui.export_mask_metrics_button.setText("Calculating...")
+                self.gui.progressbar_update(0.0)
+                self.pairwise_worker = PairwiseMetricsWorker(
+                    mask_folder,
+                    self.num_objects,
+                    pairwise_output_path,
+                    batch_size=self.pairwise_metrics_batch_size,
+                    max_workers=self.pairwise_metrics_max_workers,
+                    optimization_level=self.pairwise_metrics_optimization_level
+                )
+                self.pairwise_thread = QThread()
+                self.pairwise_worker.moveToThread(self.pairwise_thread)
+                self.pairwise_thread.started.connect(self.pairwise_worker.run)
+                self.pairwise_worker.finished.connect(self.pairwise_thread.quit)
+                self.pairwise_worker.finished.connect(self.pairwise_worker.deleteLater)
+                self.pairwise_thread.finished.connect(self.pairwise_thread.deleteLater)
+                self.pairwise_worker.progress.connect(self.gui.text)
+                self.pairwise_worker.progress_value.connect(self.gui.progressbar_update)
+                self.pairwise_worker.success.connect(self.gui.text)
+                self.pairwise_worker.error.connect(self.gui.text)
+                self.pairwise_thread.finished.connect(self._on_pairwise_metrics_finished)
+                self.pairwise_thread.start()
+                return  # Button re-enabled in _on_pairwise_metrics_finished
                 
         except Exception as e:
             print(f"ERROR: Failed to export mask metrics: {str(e)}")
             self.gui.text(f'Error exporting mask metrics: {str(e)}')
 
-    def on_save_pairwise_metrics(self):
-        """Handle saving pairwise metrics in background thread"""
-        # Get selected metrics
-        selected_metrics = []
-        if self.gui.distance_cb.isChecked():
-            selected_metrics.append('distance')
-        if self.gui.overlap_cb.isChecked():
-            selected_metrics.append('overlap_ratio')
-        if self.gui.contact_cb.isChecked():
-            selected_metrics.append('contact_length')
-            
-        if not selected_metrics:
-            self.gui.text("Please select at least one pairwise metric")
-            return
-            
-        # Get output filename
-        output_filename = "pairwise_metrics.npz"
-        output_path = Path(self.cfg['workspace']) / output_filename
-        
-        # Check if mask folder exists
-        mask_folder = Path(self.cfg['workspace']) / 'masks'
-        if not mask_folder.exists():
-            self.gui.text('No masks folder found. Please track some objects first.')
-            return
-            
-        # Disable the button to prevent multiple clicks
-        self.gui.save_pairwise_button.setEnabled(False)
-        self.gui.save_pairwise_button.setText("Calculating...")
-        # Reset progress bar
-        self.gui.progressbar_update(0.0)
-        
-        # Create worker and thread with performance configuration
-        self.pairwise_worker = PairwiseMetricsWorker(
-            mask_folder, 
-            self.num_objects, 
-            output_path,
-            batch_size=self.pairwise_metrics_batch_size,
-            max_workers=self.pairwise_metrics_max_workers,
-            optimization_level=self.pairwise_metrics_optimization_level
-        )
-        self.pairwise_thread = QThread()
-        
-        # Move worker to thread
-        self.pairwise_worker.moveToThread(self.pairwise_thread)
-        
-        # Connect signals
-        self.pairwise_thread.started.connect(self.pairwise_worker.run)
-        self.pairwise_worker.finished.connect(self.pairwise_thread.quit)
-        self.pairwise_worker.finished.connect(self.pairwise_worker.deleteLater)
-        self.pairwise_thread.finished.connect(self.pairwise_thread.deleteLater)
-        
-        # Connect progress and result signals
-        self.pairwise_worker.progress.connect(self.gui.text)
-        self.pairwise_worker.progress_value.connect(self.gui.progressbar_update)
-        self.pairwise_worker.success.connect(self.gui.text)
-        self.pairwise_worker.error.connect(self.gui.text)
-        
-        # Connect cleanup signal
-        self.pairwise_thread.finished.connect(self._on_pairwise_metrics_finished)
-        
-        # Start the thread
-        self.pairwise_thread.start()
-        
     def _on_pairwise_metrics_finished(self):
         """Clean up after pairwise metrics calculation is complete"""
-        # Re-enable the button
-        self.gui.save_pairwise_button.setEnabled(True)
-        self.gui.save_pairwise_button.setText("Save Pairwise Metrics")
+        # Re-enable the Export Mask Metrics button
+        self.gui.export_mask_metrics_button.setEnabled(True)
+        self.gui.export_mask_metrics_button.setText("Export Mask Metrics")
         # Reset progress bar
         self.gui.progressbar_update(0.0)
 
@@ -1333,6 +1445,8 @@ class MainController():
     def on_track_checkbox_change(self, obj_id: int, state: int):
         """Handle tracking checkbox state change"""
         print(f"Tracking checkbox changed for object {obj_id}: {state == Qt.CheckState.Checked.value}")
+        was_tracked = obj_id in self.tracked_objects
+        
         if state == Qt.CheckState.Checked.value:
             self.tracked_objects.add(obj_id)
             # If track is checked, also check show (you want to see what you're tracking)
@@ -1346,8 +1460,55 @@ class MainController():
                         print(f"Automatically checked show for object {obj_id} because track was checked")
         else:
             self.tracked_objects.discard(obj_id)
+        
         print(f"Visible objects: {self.visible_objects}")
         print(f"Tracked objects: {self.tracked_objects}")
+        
+        # If an object was newly tracked (wasn't tracked before, now is), reload mask from all_masks
+        # and save it to masks folder if needed
+        if state == Qt.CheckState.Checked.value and not was_tracked:
+            print(f"Object {obj_id} newly tracked, reloading mask to include it from all_masks if available")
+            
+            # Check if mask exists in masks folder for current frame (get full mask, not filtered)
+            # Pass None to get_mask to get all objects from the file
+            mask_from_masks_folder = self.res_man.get_mask(self.curr_ti, tracked_objects=None)
+            
+            if mask_from_masks_folder is None:
+                # No mask in masks folder, need to load from all_masks and save to masks folder
+                print(f"No mask in masks folder for frame {self.curr_ti}, loading from all_masks...")
+                
+                # Force load from all_masks (skip masks folder); then save combined mask
+                self.load_current_image_mask(force_from_all_masks=True)
+                self.convert_current_image_mask_torch()
+                print(f"Saving updated mask to masks folder with newly tracked object {obj_id}")
+                self.save_current_mask()
+                self.curr_frame_dirty = False
+            else:
+                # Mask exists in masks folder; check if it has all currently tracked objects
+                unique_in_mask = set(int(x) for x in np.unique(mask_from_masks_folder) if x > 0)
+                missing_tracked = self.tracked_objects - unique_in_mask
+                if missing_tracked:
+                    # Masks folder is incomplete (e.g. only object 2 after modify); rebuild from all_masks
+                    print(f"Masks folder incomplete: missing tracked objects {missing_tracked}, loading from all_masks...")
+                    self.load_current_image_mask(force_from_all_masks=True)
+                    self.convert_current_image_mask_torch()
+                    print(f"Saving updated mask to masks folder with all {len(self.tracked_objects)} tracked objects")
+                    self.save_current_mask()
+                    self.curr_frame_dirty = False
+                else:
+                    # All tracked objects already in mask, just reload for consistency
+                    print(f"Object {obj_id} already in masks folder mask, reloading for consistency")
+                    self.load_current_image_mask()
+                    self.convert_current_image_mask_torch()
+        elif state != Qt.CheckState.Checked.value and was_tracked:
+            # Object was untracked, just reload mask (will exclude it)
+            print(f"Object {obj_id} untracked, reloading mask to exclude it")
+            self.load_current_image_mask()
+            self.convert_current_image_mask_torch()
+            # Save the updated mask (without the untracked object)
+            self.save_current_mask()
+            self.curr_frame_dirty = False
+        
         self.show_current_frame()
 
     def clear_mask_cache(self):

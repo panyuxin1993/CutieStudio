@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 from PySide6.QtWidgets import (QWidget, QComboBox, QCheckBox, QHBoxLayout, QLabel, QPushButton,
                                QTextEdit, QSpinBox, QPlainTextEdit, QVBoxLayout, QSizePolicy,
                                QButtonGroup, QSlider, QRadioButton, QApplication, QFileDialog, QLineEdit,
-                               QFrame, QDialog, QGroupBox)
+                               QFrame, QDialog, QGroupBox, QScrollArea)
 
 from PySide6.QtGui import (QKeySequence, QShortcut, QTextCursor, QImage, QPixmap, QIcon)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QThread, QEvent
@@ -171,10 +171,14 @@ class GUI(QWidget):
         self.main_canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.main_canvas.setMinimumSize(100, 100)
 
+        # Store the original pixmap for zoom operations
+        self.original_pixmap = None
+
         self.main_canvas.mousePressEvent = self.on_mouse_press
         self.main_canvas.mouseMoveEvent = self.on_mouse_motion
         self.main_canvas.setMouseTracking(True)  # Required for all-time tracking
         self.main_canvas.mouseReleaseEvent = self.on_mouse_release
+        self.main_canvas.wheelEvent = self.on_wheel_event
 
         # clearing memory
         self.clear_all_mem_button = QPushButton('Reset all memory')
@@ -277,16 +281,11 @@ class GUI(QWidget):
         overlay_botbox.addWidget(self.fps_dial)
         overlay_botbox.addWidget(QLabel('Output bitrate (Mbps): '))
         overlay_botbox.addWidget(self.bitrate_dial)
-        overlay_maskarea_box = QHBoxLayout()
-        overlay_maskarea_box.addWidget(self.mask_metrics_filename)
-        overlay_maskarea_box.addWidget(self.export_mask_metrics_button)
-        overlay_botbox.addLayout(overlay_maskarea_box)
         overlay_subbox.addLayout(overlay_botbox)
         overlay_subbox.addLayout(overlay_topbox)
         navi.addLayout(overlay_subbox)
         apply_to_all_children_widget(overlay_topbox, apply_fixed_size_policy)
         apply_to_all_children_widget(overlay_botbox, apply_fixed_size_policy)
-        apply_to_all_children_widget(overlay_maskarea_box, apply_fixed_size_policy)
 
         navi.addStretch(1)
         control_subbox = QVBoxLayout()
@@ -437,11 +436,26 @@ class GUI(QWidget):
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         left_area.addWidget(line)
+
+        # Export mask metrics (path + button) above Pairwise Metrics
+        mask_metrics_row = QHBoxLayout()
+        mask_metrics_row.addWidget(self.mask_metrics_filename)
+        mask_metrics_row.addWidget(self.export_mask_metrics_button)
+        left_area.addLayout(mask_metrics_row)
         
-        # Add pairwise metrics section
+        # Add separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        left_area.addWidget(line)
+        
+        # Add pairwise metrics section (optional: if any checkbox selected, also export pairwise .npz)
         pairwise_label = QLabel("Pairwise Metrics")
         pairwise_label.setStyleSheet("font-weight: bold;")
         left_area.addWidget(pairwise_label)
+        pairwise_hint = QLabel("Also export pairwise (.npz) when any is selected")
+        pairwise_hint.setStyleSheet("color: gray; font-size: 11px;")
+        left_area.addWidget(pairwise_hint)
         
         # Create checkboxes for pairwise metrics
         self.pairwise_metrics_group = QGroupBox()
@@ -451,10 +465,10 @@ class GUI(QWidget):
         self.overlap_cb = QCheckBox("Overlap ratio")
         self.contact_cb = QCheckBox("Contact length")
         
-        # Set all checkboxes checked by default
-        self.distance_cb.setChecked(True)
-        self.overlap_cb.setChecked(True)
-        self.contact_cb.setChecked(True)
+        # Unchecked by default: only mask metrics (CSV) are exported; if any is selected, pairwise (.npz) is also exported
+        self.distance_cb.setChecked(False)
+        self.overlap_cb.setChecked(False)
+        self.contact_cb.setChecked(False)
         
         pairwise_layout.addWidget(self.distance_cb)
         pairwise_layout.addWidget(self.overlap_cb)
@@ -462,16 +476,21 @@ class GUI(QWidget):
         
         self.pairwise_metrics_group.setLayout(pairwise_layout)
         left_area.addWidget(self.pairwise_metrics_group)
-        
-        # Add save button for pairwise metrics
-        self.save_pairwise_button = QPushButton("Save Pairwise Metrics")
-        self.save_pairwise_button.clicked.connect(self.on_save_pairwise_metrics)
-        left_area.addWidget(self.save_pairwise_button)
+
+        # Wrap left_area in a widget and put it in a scroll area for small screens
+        left_panel_widget = QWidget()
+        left_panel_widget.setLayout(left_area)
+        left_scroll_area = QScrollArea()
+        left_scroll_area.setWidget(left_panel_widget)
+        left_scroll_area.setWidgetResizable(False)  # Keep natural size so scrollbars appear when needed
+        left_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll_area.setMinimumWidth(300)
 
         # Drawing area main canvas
         draw_area = QHBoxLayout()
         draw_area.addWidget(self.main_canvas, 6)  # Increased ratio for main canvas
-        draw_area.addLayout(left_area, 1)  # Left panel takes less space
+        draw_area.addWidget(left_scroll_area, 1)  # Left panel (scrollable) takes less space
 
         layout = QVBoxLayout()
         layout.addLayout(draw_area)
@@ -524,11 +543,19 @@ class GUI(QWidget):
 
         # quit shortcut
         QShortcut(QKeySequence(Qt.Key.Key_Q), self).activated.connect(self.close)
+        
+        # zoom shortcuts
+        QShortcut(QKeySequence(Qt.Key.Key_Equal), self).activated.connect(controller.zoom_in)
+        QShortcut(QKeySequence(Qt.Key.Key_Plus), self).activated.connect(controller.zoom_in)
+        QShortcut(QKeySequence(Qt.Key.Key_Minus), self).activated.connect(controller.zoom_out)
+        QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(controller.reset_zoom)
 
 
 
 
     def resizeEvent(self, event):
+        # Update canvas display when window is resized
+        self._update_canvas_display()
         self.controller.show_current_frame()
 
     def text(self, text):
@@ -551,13 +578,90 @@ class GUI(QWidget):
         bytesPerLine = 3 * width
 
         qImg = QImage(image.data, width, height, bytesPerLine, QImage.Format.Format_RGB888)
-        self.main_canvas.setPixmap(
-            QPixmap(
-                qImg.scaled(self.main_canvas.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.FastTransformation)))
-
-        self.main_canvas_size = self.main_canvas.size()
+        
+        # Store the original pixmap for zoom operations
+        self.original_pixmap = QPixmap(qImg)
         self.image_size = qImg.size()
+        
+        # Apply zoom and pan transformations
+        self._update_canvas_display()
+
+    def _update_canvas_display(self):
+        """Update the canvas display with current zoom and pan settings"""
+        if self.original_pixmap is None:
+            return
+            
+        canvas_size = self.main_canvas.size()
+        if canvas_size.width() <= 0 or canvas_size.height() <= 0:
+            return
+            
+        # Get zoom/pan state from controller
+        zoom_factor = self.controller.zoom_factor
+        pan_x = self.controller.pan_x
+        pan_y = self.controller.pan_y
+            
+        # Calculate scaled size maintaining aspect ratio
+        img_size = self.original_pixmap.size()
+        canvas_w, canvas_h = canvas_size.width(), canvas_size.height()
+        img_w, img_h = img_size.width(), img_size.height()
+        
+        # Calculate the base scale to fit the canvas
+        scale_w = canvas_w / img_w
+        scale_h = canvas_h / img_h
+        base_scale = min(scale_w, scale_h)
+        
+        # Apply zoom factor
+        current_scale = base_scale * zoom_factor
+        
+        # Calculate scaled image size
+        scaled_w = int(img_w * current_scale)
+        scaled_h = int(img_h * current_scale)
+        
+        # Scale the pixmap
+        scaled_pixmap = self.original_pixmap.scaled(
+            scaled_w, scaled_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        
+        # Apply panning
+        if zoom_factor > 1.0:
+            # Only allow panning when zoomed in
+            # Calculate pan limits
+            max_pan_x = max(0, (scaled_w - canvas_w) / 2)
+            max_pan_y = max(0, (scaled_h - canvas_h) / 2)
+            
+            # Clamp pan values
+            pan_x = max(-max_pan_x, min(max_pan_x, pan_x))
+            pan_y = max(-max_pan_y, min(max_pan_y, pan_y))
+            
+            # Update controller's pan values
+            self.controller.pan_x = pan_x
+            self.controller.pan_y = pan_y
+            
+            # Create a new pixmap with pan offset
+            final_pixmap = QPixmap(canvas_w, canvas_h)
+            final_pixmap.fill(Qt.GlobalColor.black)  # Fill with black background
+            
+            from PySide6.QtGui import QPainter
+            painter = QPainter(final_pixmap)
+            # Center the scaled image and apply pan offset
+            x_offset = (canvas_w - scaled_w) / 2 + pan_x
+            y_offset = (canvas_h - scaled_h) / 2 + pan_y
+            painter.drawPixmap(int(x_offset), int(y_offset), scaled_pixmap)
+            painter.end()
+            
+            self.main_canvas.setPixmap(final_pixmap)
+        else:
+            # When not zoomed, reset pan and just center the image
+            if pan_x != 0.0 or pan_y != 0.0:
+                self.controller.pan_x = 0.0
+                self.controller.pan_y = 0.0
+            self.main_canvas.setPixmap(
+                scaled_pixmap.scaled(canvas_size, Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+        
+        self.main_canvas_size = self.main_canvas.size()
 
 
     def update_slider(self, value):
@@ -571,21 +675,44 @@ class GUI(QWidget):
 
     def pixel_pos_to_image_pos(self, x, y):
         # Un-scale and un-pad the label coordinates into image coordinates
+        # Account for zoom and pan
         oh, ow = self.image_size.height(), self.image_size.width()
         nh, nw = self.main_canvas_size.height(), self.main_canvas_size.width()
 
         h_ratio = nh / oh
         w_ratio = nw / ow
-        dominate_ratio = min(h_ratio, w_ratio)
+        base_ratio = min(h_ratio, w_ratio)
+        
+        # Get zoom/pan state from controller
+        zoom_factor = self.controller.zoom_factor
+        pan_x = self.controller.pan_x
+        pan_y = self.controller.pan_y
+        
+        # Apply zoom factor
+        current_ratio = base_ratio * zoom_factor
 
-        # Solve scale
-        x /= dominate_ratio
-        y /= dominate_ratio
-
-        # Solve padding
-        fh, fw = nh / dominate_ratio, nw / dominate_ratio
-        x -= (fw - ow) / 2
-        y -= (fh - oh) / 2
+        # Account for panning when zoomed
+        if zoom_factor > 1.0:
+            # Calculate the center offset
+            canvas_center_x = nw / 2
+            canvas_center_y = nh / 2
+            
+            # Adjust coordinates by pan offset
+            x = x - canvas_center_x - pan_x
+            y = y - canvas_center_y - pan_y
+            
+            # Convert to image coordinates
+            x = x / current_ratio + ow / 2
+            y = y / current_ratio + oh / 2
+        else:
+            # No zoom, use original logic
+            x /= base_ratio
+            y /= base_ratio
+            
+            # Solve padding
+            fh, fw = nh / base_ratio, nw / base_ratio
+            x -= (fw - ow) / 2
+            y -= (fh - oh) / 2
 
         return x, y
 
@@ -637,6 +764,11 @@ class GUI(QWidget):
         QApplication.processEvents()
 
     def on_mouse_press(self, event):
+        # Delegate pan handling to controller first
+        if hasattr(self.controller, 'on_mouse_press_for_pan'):
+            if self.controller.on_mouse_press_for_pan(event):
+                return
+        
         if self.is_pos_out_of_bound(event.position().x(), event.position().y()):
             return
 
@@ -651,11 +783,29 @@ class GUI(QWidget):
         self.click_fn(action, ex, ey)
 
     def on_mouse_motion(self, event):
+        # Delegate pan handling to controller first
+        if hasattr(self.controller, 'on_mouse_motion_for_pan'):
+            if self.controller.on_mouse_motion_for_pan(event):
+                return
+        
+        if self.is_pos_out_of_bound(event.position().x(), event.position().y()):
+            return
+            
         ex, ey = self.get_scaled_pos(event.position().x(), event.position().y())
         self.on_mouse_motion_xy(ex, ey)
 
     def on_mouse_release(self, event):
-        pass
+        # Delegate pan handling to controller
+        if hasattr(self.controller, 'on_mouse_release_for_pan'):
+            if self.controller.on_mouse_release_for_pan(event):
+                return
+
+    def on_wheel_event(self, event):
+        """Handle mouse wheel events for zooming - delegate to controller"""
+        if hasattr(self.controller, 'on_wheel_event'):
+            self.controller.on_wheel_event(event)
+        else:
+            event.accept()
 
     def on_play_video(self):
         if self.timer.isActive():
@@ -705,7 +855,3 @@ class GUI(QWidget):
         
         dialog.setLayout(layout)
         dialog.exec()
-
-    def on_save_pairwise_metrics(self):
-        """Delegate to controller to handle saving pairwise metrics"""
-        self.controller.on_save_pairwise_metrics()
