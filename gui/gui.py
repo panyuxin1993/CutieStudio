@@ -485,7 +485,7 @@ class GUI(QWidget):
         left_scroll_area.setWidgetResizable(False)  # Keep natural size so scrollbars appear when needed
         left_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        left_scroll_area.setMinimumWidth(300)
+        left_scroll_area.setMinimumWidth(320)
 
         # Drawing area main canvas
         draw_area = QHBoxLayout()

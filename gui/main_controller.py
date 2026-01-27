@@ -308,6 +308,7 @@ class MainController():
                         # Extract tracked objects from multi-channel mask and convert to single-channel format
                         # Channel i-1 corresponds to object ID i
                         inference_mask = np.zeros((self.h, self.w), dtype=np.uint8)
+                        found_objects = set()
                         
                         # Process tracked objects in sorted order (later objects overwrite earlier ones in overlaps)
                         for obj_id in sorted(self.tracked_objects):
@@ -321,10 +322,29 @@ class MainController():
                                     num_pixels = np.sum(binary_mask > 0)
                                     if num_pixels > 0:
                                         print(f"  Extracted object {obj_id} (channel {channel_idx}) from all_masks: {num_pixels} pixels")
+                                        found_objects.add(obj_id)
+                        
+                        # Check for any tracked objects missing from all_masks - try loading from soft_masks
+                        missing_objects = self.tracked_objects - found_objects
+                        if missing_objects:
+                            print(f"Some tracked objects missing from all_masks: {missing_objects}, checking soft_masks...")
+                            for obj_id in sorted(missing_objects):
+                                if 1 <= obj_id <= self.num_objects:
+                                    p = os.path.join(self.res_man.soft_mask_dir, f'{obj_id}', f'{self.curr_ti:07d}.png')
+                                    if os.path.exists(p):
+                                        m = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+                                        if m is not None:
+                                            if m.shape != (self.h, self.w):
+                                                m = cv2.resize(m, (self.w, self.h), interpolation=cv2.INTER_NEAREST)
+                                            binary = (m > 127).astype(np.uint8)
+                                            inference_mask[binary > 0] = obj_id
+                                            num_pixels = np.sum(binary > 0)
+                                            if num_pixels > 0:
+                                                print(f"  Loaded object {obj_id} from soft_masks: {num_pixels} pixels")
                         
                         self.curr_mask = inference_mask
                         self.curr_prob = None
-                        print(f"Generated inference mask from all_masks: {len(self.tracked_objects)} tracked objects, {np.sum(inference_mask > 0)} non-zero pixels")
+                        print(f"Generated inference mask from all_masks (and soft_masks): {len(self.tracked_objects)} tracked objects, {np.sum(inference_mask > 0)} non-zero pixels")
                     else:
                         # all_masks missing; build from individual soft masks if force_from_all_masks
                         if force_from_all_masks:
@@ -875,14 +895,159 @@ class MainController():
             self.curr_ti = 0
         self.gui.tl_slider.setValue(self.curr_ti)
 
+    def regenerate_visualization_with_all_objects(self):
+        """Regenerate visualization images for all frames including all objects from all_masks or soft_masks"""
+        self.gui.text('Regenerating visualization images with all objects...')
+        self.gui.process_events()
+        
+        # Save original visible_objects to restore later
+        original_visible_objects = self.visible_objects.copy()
+        original_curr_ti = self.curr_ti
+        
+        # Find all frames that have masks
+        frames_with_masks = set()
+        
+        # Check all_masks folder
+        all_masks_dir = path.join(self.cfg['workspace'], 'all_masks')
+        if path.exists(all_masks_dir):
+            for mask_file in os.listdir(all_masks_dir):
+                if mask_file.endswith('.npz') or mask_file.endswith('.npy'):
+                    try:
+                        # all_masks use 7-digit format (0000000.npz or 0000000.npy)
+                        frame_idx = int(mask_file.replace('.npz', '').replace('.npy', ''))
+                        if 0 <= frame_idx < self.T:
+                            frames_with_masks.add(frame_idx)
+                    except ValueError:
+                        pass
+        
+        # Check soft_masks folder
+        soft_mask_dir = self.res_man.soft_mask_dir
+        if path.exists(soft_mask_dir):
+            for obj_dir in os.listdir(soft_mask_dir):
+                obj_path = path.join(soft_mask_dir, obj_dir)
+                if path.isdir(obj_path):
+                    for mask_file in os.listdir(obj_path):
+                        if mask_file.endswith('.png'):
+                            try:
+                                # Soft masks use 7-digit format (0000000.png)
+                                frame_idx = int(mask_file.replace('.png', ''))
+                                if 0 <= frame_idx < self.T:
+                                    frames_with_masks.add(frame_idx)
+                            except ValueError:
+                                pass
+        
+        if not frames_with_masks:
+            self.gui.text('No masks found in all_masks or soft_masks folders')
+            return False
+        
+        frames_with_masks = sorted(frames_with_masks)
+        self.gui.text(f'Found {len(frames_with_masks)} frames with masks. Regenerating visualizations...')
+        
+        # For each frame, find all objects that exist and regenerate visualization
+        total_frames = len(frames_with_masks)
+        for idx, ti in enumerate(frames_with_masks):
+            # Find all objects that exist in this frame
+            existing_objects = set()
+            
+            # Check all_masks
+            all_masks_data = self.res_man.get_all_masks(ti)
+            if all_masks_data is not None:
+                multi_channel_mask = all_masks_data['mask']
+                for obj_id in range(1, self.num_objects + 1):
+                    channel_idx = obj_id - 1
+                    if channel_idx < multi_channel_mask.shape[0]:
+                        if np.any(multi_channel_mask[channel_idx] > 0.5):
+                            existing_objects.add(obj_id)
+            
+            # Check soft_masks for any objects not found in all_masks
+            for obj_id in range(1, self.num_objects + 1):
+                if obj_id not in existing_objects:
+                    soft_mask_path = os.path.join(soft_mask_dir, f'{obj_id}', f'{ti:07d}.png')
+                    if os.path.exists(soft_mask_path):
+                        existing_objects.add(obj_id)
+            
+            if not existing_objects:
+                continue
+            
+            # Temporarily set visible_objects to include all existing objects
+            self.visible_objects = existing_objects.copy()
+            self.curr_ti = ti
+            
+            # Load image and mask for this frame
+            try:
+                self.curr_image_np = self.res_man.get_image(ti)
+                if self.curr_image_np is None:
+                    print(f"Warning: Could not load image for frame {ti}, skipping...")
+                    continue
+                
+                self.curr_image_torch = None
+                self.curr_prob = None
+                self.curr_mask = None
+                
+                # Load mask from all_masks or soft_masks
+                self.load_current_image_mask(force_from_all_masks=True)
+                
+                # Only convert to torch if we have a mask
+                if self.curr_mask is not None:
+                    self.convert_current_image_mask_torch()
+                
+                # Compose visualization with all objects
+                self.compose_current_im()
+                
+                # Save visualization directly (synchronously) to ensure it's saved before export
+                vis_dir = path.join(self.cfg['workspace'], 'visualization', self.vis_mode)
+                os.makedirs(vis_dir, exist_ok=True)
+                name = self.res_man.names[ti]
+                
+                # Convert RGB to BGR for OpenCV
+                if self.vis_mode == 'rgba':
+                    vis_image_bgr = cv2.cvtColor(self.vis_image, cv2.COLOR_RGBA2BGRA)
+                    cv2.imwrite(path.join(vis_dir, name + '.png'), vis_image_bgr)
+                else:
+                    vis_image_bgr = cv2.cvtColor(self.vis_image, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(path.join(vis_dir, name + '.jpg'), vis_image_bgr)
+                
+            except Exception as e:
+                print(f"Error regenerating visualization for frame {ti}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                continue
+            
+            # Update progress
+            if (idx + 1) % 10 == 0 or idx == total_frames - 1:
+                progress = (idx + 1) / total_frames
+                self.gui.progressbar_update(progress)
+                self.gui.text(f'Regenerated {idx + 1}/{total_frames} frames')
+                self.gui.process_events()
+        
+        # Restore original state
+        self.visible_objects = original_visible_objects
+        self.curr_ti = original_curr_ti
+        
+        # Reload current frame to restore display
+        if self.curr_ti is not None:
+            self.load_current_image_mask()
+            self.convert_current_image_mask_torch()
+            self.show_current_frame()
+        
+        self.gui.text(f'Finished regenerating visualization images for {total_frames} frames')
+        return True
+
     def on_export_visualization(self):
+        # Regenerate visualization images with all objects before exporting
+        self.gui.text('Preparing video export: regenerating visualizations with all objects...')
+        self.gui.process_events()
+        
+        if not self.regenerate_visualization_with_all_objects():
+            self.gui.text('Failed to regenerate visualizations. Proceeding with existing images...')
+        
         # NOTE: Save visualization at the end of propagation
         image_folder = path.join(self.cfg['workspace'], 'visualization', self.vis_mode)
         save_folder = self.cfg['workspace']
         if path.exists(image_folder):
             # Sorted so frames will be in order
             output_path = path.join(save_folder, f'visualization_{self.vis_mode}.mp4')
-            self.gui.text(f'Exporting visualization -- please wait')
+            self.gui.text(f'Exporting visualization video -- please wait')
             self.gui.process_events()
             convert_frames_to_video(image_folder,
                                     output_path,

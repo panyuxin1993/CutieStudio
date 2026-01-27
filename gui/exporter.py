@@ -17,6 +17,10 @@ def convert_frames_to_video(
     frame = cv2.imread(os.path.join(image_folder, images[0]))
     height, width, layers = frame.shape
 
+    # libx264 requires width and height to be divisible by 2; crop if odd
+    width = (width // 2) * 2
+    height = (height // 2) * 2
+
     output = av.open(output_path, mode="w")
 
     stream = output.add_stream("h264", rate=fps)
@@ -27,6 +31,7 @@ def convert_frames_to_video(
 
     for i, img_path in enumerate(images):
         img = cv2.imread(os.path.join(image_folder, img_path))
+        img = img[:height, :width]  # crop to even dimensions for encoder
         frame = av.VideoFrame.from_ndarray(img, format='bgr24')
         packet = stream.encode(frame)
         output.mux(packet)
