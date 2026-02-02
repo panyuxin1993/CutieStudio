@@ -896,12 +896,15 @@ class MainController():
         self.gui.tl_slider.setValue(self.curr_ti)
 
     def regenerate_visualization_with_all_objects(self):
-        """Regenerate visualization images for all frames including all objects from all_masks or soft_masks"""
-        self.gui.text('Regenerating visualization images with all objects...')
+        """Regenerate visualization images and masks in 'masks' folder for all frames,
+        including all objects from all_masks or soft_masks (visualization = with background, masks = index image only).
+        """
+        self.gui.text('Regenerating visualization images and masks with all objects...')
         self.gui.process_events()
         
-        # Save original visible_objects to restore later
+        # Save original state to restore later
         original_visible_objects = self.visible_objects.copy()
+        original_tracked_objects = self.tracked_objects.copy()
         original_curr_ti = self.curr_ti
         
         # Find all frames that have masks
@@ -941,7 +944,7 @@ class MainController():
             return False
         
         frames_with_masks = sorted(frames_with_masks)
-        self.gui.text(f'Found {len(frames_with_masks)} frames with masks. Regenerating visualizations...')
+        self.gui.text(f'Found {len(frames_with_masks)} frames with masks. Regenerating visualizations and masks...')
         
         # For each frame, find all objects that exist and regenerate visualization
         total_frames = len(frames_with_masks)
@@ -1007,6 +1010,10 @@ class MainController():
                     vis_image_bgr = cv2.cvtColor(self.vis_image, cv2.COLOR_RGB2BGR)
                     cv2.imwrite(path.join(vis_dir, name + '.jpg'), vis_image_bgr)
                 
+                # Regenerate mask in 'masks' folder (single-channel index image, all objects, no background)
+                if self.curr_mask is not None:
+                    self.res_man.save_mask_sync(ti, self.curr_mask, tracked_objects=existing_objects)
+                
             except Exception as e:
                 print(f"Error regenerating visualization for frame {ti}: {str(e)}")
                 import traceback
@@ -1017,11 +1024,12 @@ class MainController():
             if (idx + 1) % 10 == 0 or idx == total_frames - 1:
                 progress = (idx + 1) / total_frames
                 self.gui.progressbar_update(progress)
-                self.gui.text(f'Regenerated {idx + 1}/{total_frames} frames')
+                self.gui.text(f'Regenerated {idx + 1}/{total_frames} frames (visualization + masks)')
                 self.gui.process_events()
         
         # Restore original state
         self.visible_objects = original_visible_objects
+        self.tracked_objects = original_tracked_objects
         self.curr_ti = original_curr_ti
         
         # Reload current frame to restore display
@@ -1030,7 +1038,7 @@ class MainController():
             self.convert_current_image_mask_torch()
             self.show_current_frame()
         
-        self.gui.text(f'Finished regenerating visualization images for {total_frames} frames')
+        self.gui.text(f'Finished regenerating visualization images and masks for {total_frames} frames')
         return True
 
     def on_export_visualization(self):

@@ -415,6 +415,34 @@ class ResourceManager:
         self.invalidate(ti)
         self.add_to_queue_with_warning(SaveItem('mask', mask_img, self.names[ti]))
 
+    def save_mask_sync(self, ti: int, mask: np.ndarray, tracked_objects: set = None):
+        """Save mask to masks folder synchronously (writes directly to disk).
+        Same semantics as save_mask but does not use the queue. Use when masks must be on disk immediately.
+        """
+        assert 0 <= ti < self.length
+        assert isinstance(mask, np.ndarray)
+        h, w = mask.shape[0], mask.shape[1]
+        if tracked_objects is None:
+            unique_ids = np.unique(mask)
+            tracked_objects = set([int(id) for id in unique_ids if id > 0])
+        if not tracked_objects:
+            inference_mask = np.zeros((h, w), dtype=np.uint8)
+        else:
+            inference_mask = np.zeros((h, w), dtype=np.uint8)
+            for obj_id in tracked_objects:
+                inference_mask[mask == obj_id] = obj_id
+        mask_img = Image.fromarray(inference_mask, mode='P')
+        if isinstance(self.palette, bytes):
+            palette_list = []
+            for i in range(0, len(self.palette), 3):
+                palette_list.extend([self.palette[i], self.palette[i+1], self.palette[i+2]])
+            mask_img.putpalette(palette_list)
+        else:
+            mask_img.putpalette(self.palette)
+        self.invalidate(ti)
+        mask_path = path.join(self.mask_dir, self.names[ti] + '.png')
+        mask_img.save(mask_path)
+
     def save_visualization(self, ti: int, vis_mode: str, image: np.ndarray):
         # image should be uint8 3*H*W
         assert 0 <= ti < self.length
