@@ -158,17 +158,24 @@ See [PERFORMANCE_OPTIMIZATION.md](PERFORMANCE_OPTIMIZATION.md) for detailed tech
 
 ## Recent Updates
 
-- **Fixed Reset Buttons**: Reset frame and Reset object buttons now work properly with immediate visual feedback
+### GUI and workflow
+
+- **Export dialog**: Mask metrics, visualization video export (FPS/bitrate), and binary masks are now in a dedicated **Export…** dialog. The main right panel is focused on annotation and inference (object list, memory, import, console).
+- **Propagate step forward**: New **Propagate step forward** button runs forward propagation with memory reset every frame (equivalent to repeated **Step forward**). Each frame is inferred from the current image so masks differ per frame; useful for frame-independent segmentation.
+- **Console layout**: The right-panel console no longer uses a fixed height; it expands to use available vertical space (minimum 80px) so you get more log area when the window is tall.
+- **Mask metrics export progress**: Exporting mask metrics now reports progress in the main GUI progress bar (same as visualization and binary mask export), with UI updates during the run.
+
+### Fixes and behavior
+
+- **Fixed Reset Buttons**: Reset frame and Reset object buttons now work properly with immediate visual feedback and clear masks from disk
 - **Fixed Reset Object Colors**: Reset object button now properly remaps remaining object IDs to maintain color consistency
-- **Fixed Reset Buttons**: Reset frame and Reset object buttons now properly clear masks from disk and update combined masks
 - **Fixed Propagation Logic**: Tracked objects from current probabilities are now shown first during propagation, not existing soft masks
-- **Logical Checkbox Relationships**: Added automatic checkbox state management - when "Track" is checked, "Show" is automatically checked; when "Show" is unchecked, "Track" is automatically unchecked
-- **Include All Visible Objects in Combined Masks**: New feature to include all visible objects in combined masks while preserving existing soft masks for untracked objects
-- **Real-time Tracking Visibility**: Fixed issue where only tracked objects were visible during propagation - now all visible objects are shown in real-time
-- **Real-time Visualization Fix**: Fixed issue where masks weren't visible during propagation when tracking all objects with no previous results
-- **Mixed Soft Masks Fix**: Fixed issue where only objects with existing soft masks were visible during propagation when some objects had soft masks and others didn't
-- Enhanced GUI controls for flexible object management
-- Improved combined mask generation that preserves existing data
+- **Logical Checkbox Relationships**: When "Track" is checked, "Show" is automatically checked; when "Show" is unchecked, "Track" is automatically unchecked
+- **Include All Visible Objects in Combined Masks**: Option to include all visible objects in combined masks while preserving existing soft masks for untracked objects
+- **Real-time Tracking Visibility**: All visible objects are shown in real-time during propagation
+- **Real-time Visualization Fix**: Masks are visible during propagation when tracking all objects with no previous results
+- **Mixed Soft Masks Fix**: Visibility fixed when some objects have soft masks and others do not
+- Enhanced GUI controls for flexible object management and combined mask generation that preserves existing data
 
 ## Citation
 

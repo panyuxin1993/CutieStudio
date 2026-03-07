@@ -20,7 +20,14 @@ GUI Layout:
   - The 'manual' buttom will show tips 
   - console output
 - The bottom panel contains frame navigation and propagation controls
-- The left panel contains additional controls:
+  - there are two options to propagate, with or without 'step': 
+  - with 'step' propagation will clear memory after inferencing each frame
+  - without 'step' propagation is the traditional one that will have memory
+- TIP: 
+  - when rat cross a tube or something that will partially occlude the rat, causing split body parts, use 'propagate_forward'
+  - when rat stay still, especially when a passenger rat run nearby, use 'step_propagate_forward', since the 'propagate_forward' may track the running one
+  - when ratA chase ratB, use 'step_propagate_forward' to track ratA and use 'propagate_forward' to track ratB
+- The export panel contains additional controls:
   - Mask metrics export controls
   - Pairwise metrics controls with checkboxes for different metric types
   - Save soft mask toggle for tracking

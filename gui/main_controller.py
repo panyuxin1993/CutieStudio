@@ -654,6 +654,17 @@ class MainController():
             self.propagate_direction = 'forward'
             self.on_propagate()
 
+    def on_propagate_step_forward(self):
+        """Propagate forward through all frames but reset memory every frame (like Step forward repeatedly)."""
+        if self.propagating:
+            self.propagating = False
+            self.propagate_direction = 'none'
+        else:
+            self.propagate_fn = self.on_next_frame
+            self.gui.forward_propagation_start()
+            self.propagate_direction = 'forward'
+            self.propagate_step_forward_loop()
+
     def step_forward_propagation(self):
         if self.propagating:
             # acts as a pause button
@@ -848,6 +859,85 @@ class MainController():
                     break
                 # Break after processing one frame (this is step_propagate, not full propagation)
                 break
+
+            self.propagating = False
+            self.curr_frame_dirty = False
+            self.on_pause()
+            self.on_slider_update()
+            self.gui.process_events()
+
+    def propagate_step_forward_loop(self):
+        """Propagate forward through all frames, clearing memory after each frame (each frame uses only previous frame mask)."""
+        with autocast(self.device, enabled=(self.amp and self.device == 'cuda')):
+            self.convert_current_image_mask_torch()
+
+            self.tracked_prob = self.curr_prob.clone()
+            for obj_id in range(1, self.num_objects + 1):
+                if obj_id not in self.tracked_objects:
+                    self.tracked_prob[obj_id] = 0
+
+            self.gui.text(f'Propagation step forward started at t={self.curr_ti} (memory reset every frame).')
+            self.processor.clear_sensory_memory()
+            self.curr_prob = self.processor.step(self.curr_image_torch,
+                                                 self.tracked_prob[1:],
+                                                 idx_mask=False)
+            self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
+            self.interacted_prob = None
+            self.reset_this_interaction()
+            self.show_current_frame(fast=True, invalid_soft_mask=True)
+
+            self.propagating = True
+            self.gui.clear_all_mem_button.setEnabled(False)
+            self.gui.clear_non_perm_mem_button.setEnabled(False)
+            self.gui.tl_slider.setEnabled(False)
+
+            dataset = PropagationReader(self.res_man, self.curr_ti, self.propagate_direction)
+            loader = get_data_loader(dataset, self.cfg.num_read_workers)
+
+            for data in loader:
+                if not self.propagating:
+                    break
+
+                frame_start_time = time.time()
+
+                self.curr_image_np, self.curr_image_torch = data
+                self.curr_image_torch = self.curr_image_torch.to(self.device, non_blocking=True)
+                self.propagate_fn()  # advance to next frame
+
+                self.curr_prob = self.processor.step(self.curr_image_torch)
+                self.curr_mask = torch_prob_to_numpy_mask(self.curr_prob)
+
+                self.save_current_mask()
+                if self.save_soft_mask:
+                    soft_masks = {}
+                    for obj_id in range(1, self.num_objects + 1):
+                        if obj_id in self.tracked_objects:
+                            obj_mask = self.curr_prob[obj_id].cpu().numpy()
+                            soft_masks[obj_id] = obj_mask
+                    if soft_masks:
+                        self.res_man.save_batch_soft_masks(self.curr_ti, soft_masks, self.tracked_objects, self.save_all_visible)
+
+                self.show_current_frame(fast=True)
+                self.res_man.invalidate(self.curr_ti)
+
+                frame_time = time.time() - frame_start_time
+                self.update_performance_stats(frame_time)
+
+                self.on_clear_memory()
+                self.update_memory_gauges()
+                self.gui.process_events()
+                # Re-init from previous frame mask and clear memory so this frame is independent
+                self.convert_current_image_mask_torch()
+                self.processor.clear_sensory_memory()
+                tracked_prob = self.curr_prob.clone()
+                for obj_id in range(1, self.num_objects + 1):
+                    if obj_id not in self.tracked_objects:
+                        tracked_prob[obj_id] = 0
+                self.curr_prob = self.processor.step(self.curr_image_torch,
+                                                    tracked_prob[1:],
+                                                    idx_mask=False)
+                if self.curr_ti == 0 or self.curr_ti == self.T - 1:
+                    break
 
             self.propagating = False
             self.curr_frame_dirty = False
@@ -1095,10 +1185,10 @@ class MainController():
         # on_slider_update will be triggered automatically by the slider's valueChanged signal
 
     def on_fps_dial_change(self):
-        self.output_fps = self.gui.fps_dial.value()
+        self.output_fps = self.gui.export_dialog.fps_dial.value()
 
     def on_bitrate_dial_change(self):
-        self.output_bitrate = self.gui.bitrate_dial.value()
+        self.output_bitrate = self.gui.export_dialog.bitrate_dial.value()
 
     def update_interacted_mask(self):
         self.curr_prob = self.interacted_prob
@@ -1472,7 +1562,7 @@ class MainController():
         return self.res_man.T
 
     def on_export_mask_metrics(self):
-        output_filename = self.gui.mask_metrics_filename.text()
+        output_filename = self.gui.export_dialog.mask_metrics_filename.text()
         if not output_filename.endswith('.csv'):
             output_filename += '.csv'
             
@@ -1532,8 +1622,22 @@ class MainController():
             
         try:
             print("\nCalculating mask metrics...")
-            df = calculate_mask_metrics_batch(mask_folder, self.num_objects, self.name_objects, previous_df)
-            
+            self.gui.text('Calculating mask metrics...')
+            self.gui.progressbar_update(0.0)
+            self.gui.process_events()
+
+            def _mask_metrics_progress(p: float):
+                self.gui.progressbar_update(p)
+                self.gui.process_events()
+
+            df = calculate_mask_metrics_batch(
+                mask_folder,
+                self.num_objects,
+                self.name_objects,
+                previous_df,
+                progress_callback=_mask_metrics_progress,
+            )
+
             if df.empty:
                 print("WARNING: No metrics were calculated - DataFrame is empty")
                 self.gui.text('No mask metrics were calculated. Please check if masks exist and contain valid objects.')
@@ -1544,7 +1648,9 @@ class MainController():
             print(f"Columns: {df.columns.tolist()}")
             df.to_csv(output_path, index=False)
             print(f"Successfully wrote {len(df)} rows to {output_path}")
-            
+            self.gui.progressbar_update(1.0)
+            self.gui.process_events()
+
             # Provide feedback about what was calculated
             if previous_df is not None:
                 new_rows = len(df) - len(previous_df)
@@ -1554,12 +1660,13 @@ class MainController():
                     self.gui.text(f'Successfully exported mask metrics to {output_filename} (no new calculations needed)')
             else:
                 self.gui.text(f'Successfully exported mask metrics to {output_filename}')
+            self.gui.progressbar_update(0.0)
 
             # If any pairwise metric checkbox is selected, also export pairwise metrics (.npz)
-            if (self.gui.distance_cb.isChecked() or self.gui.overlap_cb.isChecked() or self.gui.contact_cb.isChecked()):
+            if (self.gui.export_dialog.distance_cb.isChecked() or self.gui.export_dialog.overlap_cb.isChecked() or self.gui.export_dialog.contact_cb.isChecked()):
                 pairwise_output_path = Path(self.cfg['workspace']) / "pairwise_metrics.npz"
-                self.gui.export_mask_metrics_button.setEnabled(False)
-                self.gui.export_mask_metrics_button.setText("Calculating...")
+                self.gui.export_dialog.export_mask_metrics_button.setEnabled(False)
+                self.gui.export_dialog.export_mask_metrics_button.setText("Calculating...")
                 self.gui.progressbar_update(0.0)
                 self.pairwise_worker = PairwiseMetricsWorker(
                     mask_folder,
@@ -1590,8 +1697,8 @@ class MainController():
     def _on_pairwise_metrics_finished(self):
         """Clean up after pairwise metrics calculation is complete"""
         # Re-enable the Export Mask Metrics button
-        self.gui.export_mask_metrics_button.setEnabled(True)
-        self.gui.export_mask_metrics_button.setText("Export Mask Metrics")
+        self.gui.export_dialog.export_mask_metrics_button.setEnabled(True)
+        self.gui.export_dialog.export_mask_metrics_button.setText("Export Mask Metrics")
         # Reset progress bar
         self.gui.progressbar_update(0.0)
 
@@ -1700,7 +1807,7 @@ class MainController():
         self.performance_stats['last_frame_time'] = time.time()
         
         # Update GUI with performance info
-        if hasattr(self, 'gui') and self.performance_stats['frames_processed'] % 10 == 0:
+        if hasattr(self, 'gui') and self.performance_stats['frames_processed'] % 100 == 0:
             fps = self.performance_stats['avg_fps']
             self.gui.text(f"Performance: {fps:.1f} FPS, {self.performance_stats['frames_processed']} frames processed")
 

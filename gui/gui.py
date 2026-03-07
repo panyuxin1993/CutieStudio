@@ -14,8 +14,97 @@ from PySide6.QtCore import Qt, QTimer, QSize, Signal, QThread, QEvent
 
 from cutie.utils.palette import davis_palette_np
 from gui.gui_utils import *
-from utils.mask_metrics import (calculate_mask_metrics_batch, calculate_all_pairwise_metrics, 
+from utils.mask_metrics import (calculate_mask_metrics_batch, calculate_all_pairwise_metrics,
                               save_pairwise_metrics, load_pairwise_metrics)
+
+
+class ExportDialog(QDialog):
+    """Dialog for mask metrics export, visualization video export, and binary masks export."""
+
+    def __init__(self, parent: QWidget, controller, cfg: DictConfig):
+        super().__init__(parent)
+        self.setWindowTitle('Export')
+        self.controller = controller
+        self.cfg = cfg
+
+        layout = QVBoxLayout()
+
+        # --- Mask Metrics ---
+        mask_grp = QGroupBox('Mask Metrics')
+        mask_layout = QVBoxLayout()
+        self.mask_metrics_filename = QLineEdit()
+        self.mask_metrics_filename.setPlaceholderText('Output CSV path')
+        self.mask_metrics_filename.setText(str(Path(cfg['workspace']) / 'mask_metrics.csv'))
+        self.mask_metrics_filename.setMinimumWidth(280)
+        mask_layout.addWidget(QLabel('Output file:'))
+        mask_layout.addWidget(self.mask_metrics_filename)
+        pairwise_hint = QLabel('Also export pairwise (.npz) when any option below is selected')
+        pairwise_hint.setStyleSheet('color: gray; font-size: 11px;')
+        mask_layout.addWidget(pairwise_hint)
+        self.distance_cb = QCheckBox('Distance between centroids')
+        self.overlap_cb = QCheckBox('Overlap ratio')
+        self.contact_cb = QCheckBox('Contact length')
+        self.distance_cb.setChecked(False)
+        self.overlap_cb.setChecked(False)
+        self.contact_cb.setChecked(False)
+        mask_layout.addWidget(self.distance_cb)
+        mask_layout.addWidget(self.overlap_cb)
+        mask_layout.addWidget(self.contact_cb)
+        self.export_mask_metrics_button = QPushButton('Export Mask Metrics')
+        self.export_mask_metrics_button.clicked.connect(controller.on_export_mask_metrics)
+        mask_layout.addWidget(self.export_mask_metrics_button)
+        mask_grp.setLayout(mask_layout)
+        layout.addWidget(mask_grp)
+
+        # --- Export Visualization Video ---
+        video_grp = QGroupBox('Export Visualization Video')
+        video_layout = QVBoxLayout()
+        video_layout.addWidget(QLabel('Output FPS:'))
+        self.fps_dial = QSpinBox()
+        self.fps_dial.setMinimum(1)
+        self.fps_dial.setMaximum(60)
+        self.fps_dial.setValue(cfg['output_fps'])
+        self.fps_dial.editingFinished.connect(controller.on_fps_dial_change)
+        video_layout.addWidget(self.fps_dial)
+        video_layout.addWidget(QLabel('Output bitrate (Mbps):'))
+        self.bitrate_dial = QSpinBox()
+        self.bitrate_dial.setMinimum(1)
+        self.bitrate_dial.setMaximum(100)
+        self.bitrate_dial.setValue(cfg['output_bitrate'])
+        self.bitrate_dial.editingFinished.connect(controller.on_bitrate_dial_change)
+        video_layout.addWidget(self.bitrate_dial)
+        self.export_video_button = QPushButton('Export as video')
+        self.export_video_button.clicked.connect(controller.on_export_visualization)
+        video_layout.addWidget(self.export_video_button)
+        video_grp.setLayout(video_layout)
+        layout.addWidget(video_grp)
+
+        # --- Export Binary Masks ---
+        binary_grp = QGroupBox('Export Binary Masks')
+        binary_layout = QVBoxLayout()
+        binary_hint = QLabel('Export masks for e.g. ProPainter (binary_masks folder)')
+        binary_hint.setStyleSheet('color: gray; font-size: 11px;')
+        binary_layout.addWidget(binary_hint)
+        self.export_binary_button = QPushButton('Export binary masks')
+        self.export_binary_button.clicked.connect(controller.on_export_binary)
+        binary_layout.addWidget(self.export_binary_button)
+        binary_grp.setLayout(binary_layout)
+        layout.addWidget(binary_grp)
+
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+        self.setLayout(layout)
+        self.setMinimumWidth(340)
+
+    def showEvent(self, event):
+        """Sync FPS/bitrate from controller when dialog is shown."""
+        super().showEvent(event)
+        if hasattr(self.controller, 'output_fps'):
+            self.fps_dial.setValue(self.controller.output_fps)
+        if hasattr(self.controller, 'output_bitrate'):
+            self.bitrate_dial.setValue(self.controller.output_bitrate)
 
 
 class GUI(QWidget):
@@ -49,23 +138,11 @@ class GUI(QWidget):
         self.save_all_visible_checkbox.setChecked(cfg.get('performance', {}).get('save_all_visible', True))
         self.save_all_visible_checkbox.toggled.connect(controller.on_save_all_visible_toggle)
 
-        # Export mask metrics
-        self.mask_metrics_filename = QLineEdit()
-        self.mask_metrics_filename.setPlaceholderText("Enter output CSV filename")
-        self.mask_metrics_filename.setText(str(Path(cfg["workspace"]) / "mask_metrics.csv"))
-        self.mask_metrics_filename.setMinimumWidth(200)
-        self.export_mask_metrics_button = QPushButton('Export Mask Metrics')
-        self.export_mask_metrics_button.clicked.connect(controller.on_export_mask_metrics)
-
         # set up some buttons
         self.play_button = QPushButton('Play video')
         self.play_button.clicked.connect(self.on_play_video)
         self.commit_button = QPushButton('Commit to permanent memory')
         self.commit_button.clicked.connect(controller.on_commit)
-        self.export_video_button = QPushButton('Export as video')
-        self.export_video_button.clicked.connect(controller.on_export_visualization)
-        self.export_binary_button = QPushButton('Export binary masks')
-        self.export_binary_button.clicked.connect(controller.on_export_binary)
 
         self.forward_run_button = QPushButton('Propagate forward')
         self.forward_run_button.clicked.connect(controller.on_forward_propagation)
@@ -74,6 +151,10 @@ class GUI(QWidget):
         self.forward_step_button = QPushButton('Step forward')
         self.forward_step_button.clicked.connect(controller.step_forward_propagation)
         self.forward_step_button.setMinimumWidth(100)
+
+        self.forward_step_run_button = QPushButton('Propagate step forward')
+        self.forward_step_run_button.clicked.connect(controller.on_propagate_step_forward)
+        self.forward_step_run_button.setMinimumWidth(160)
 
         self.backward_run_button = QPushButton('Propagate backward')
         self.backward_run_button.clicked.connect(controller.on_backward_propagation)
@@ -148,23 +229,6 @@ class GUI(QWidget):
         self.save_visualization_combo.currentTextChanged.connect(
             controller.on_set_save_visualization_mode)
 
-        # controls for output FPS and bitrate
-        self.fps_dial = QSpinBox()
-        self.fps_dial.setReadOnly(False)
-        self.fps_dial.setMinimumSize(100, 30)
-        self.fps_dial.setMinimum(1)
-        self.fps_dial.setMaximum(60)
-        self.fps_dial.setValue(cfg['output_fps'])
-        self.fps_dial.editingFinished.connect(controller.on_fps_dial_change)
-
-        self.bitrate_dial = QSpinBox()
-        self.bitrate_dial.setReadOnly(False)
-        self.bitrate_dial.setMinimumSize(40, 30)
-        self.bitrate_dial.setMinimum(1)
-        self.bitrate_dial.setMaximum(100)
-        self.bitrate_dial.setValue(cfg['output_bitrate'])
-        self.bitrate_dial.editingFinished.connect(controller.on_bitrate_dial_change)
-
         # Main canvas -> QLabel
         self.main_canvas = QLabel()
         self.main_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -217,10 +281,11 @@ class GUI(QWidget):
         self.import_layer_button = QPushButton('Import layer')
         self.import_layer_button.clicked.connect(controller.on_import_layer)
 
-        # Console on the GUI
+        # Console on the GUI (expands to use available space in the right panel)
         self.console = QTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMaximumHeight(100)
+        self.console.setMinimumHeight(80)
+        self.console.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
         # Tips for the users
         self.tips = QTextEdit()
@@ -267,20 +332,14 @@ class GUI(QWidget):
         overlay_botbox = QHBoxLayout()
         overlay_topbox.setAlignment(Qt.AlignmentFlag.AlignLeft)
         overlay_botbox.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        overlay_topbox.addWidget(QLabel('Visualization mode'))
-        overlay_topbox.addWidget(self.combo)
         overlay_topbox.addWidget(QLabel('Save soft mask during propagation'))
         overlay_topbox.addWidget(self.save_soft_mask_checkbox)
         overlay_topbox.addWidget(QLabel('Include all visible objects in combined masks'))
         overlay_topbox.addWidget(self.save_all_visible_checkbox)
-        overlay_topbox.addWidget(self.export_binary_button)
         overlay_botbox.addWidget(QLabel('Save visualization'))
         overlay_botbox.addWidget(self.save_visualization_combo)
-        overlay_botbox.addWidget(self.export_video_button)
-        overlay_botbox.addWidget(QLabel('Output FPS: '))
-        overlay_botbox.addWidget(self.fps_dial)
-        overlay_botbox.addWidget(QLabel('Output bitrate (Mbps): '))
-        overlay_botbox.addWidget(self.bitrate_dial)
+        overlay_botbox.addWidget(QLabel('Visualization mode'))
+        overlay_botbox.addWidget(self.combo)
         overlay_subbox.addLayout(overlay_botbox)
         overlay_subbox.addLayout(overlay_topbox)
         navi.addLayout(overlay_subbox)
@@ -292,6 +351,7 @@ class GUI(QWidget):
         control_topbox = QHBoxLayout()
         control_botbox = QHBoxLayout()
         control_topbox.addWidget(self.forward_step_button)
+        control_topbox.addWidget(self.forward_step_run_button)
         control_topbox.addWidget(self.commit_button)
         control_topbox.addWidget(self.forward_run_button)
         control_topbox.addWidget(self.backward_run_button)
@@ -301,17 +361,17 @@ class GUI(QWidget):
         navi.addLayout(control_subbox)
 
         # left area
-        left_area = QVBoxLayout()
-        left_area.setAlignment(Qt.AlignmentFlag.AlignTop)
+        right_area = QVBoxLayout()
+        right_area.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         # Add Manual button at the top
-        left_area.addWidget(self.manual_button)
+        right_area.addWidget(self.manual_button)
         
         # Add separator line
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        left_area.addWidget(line)
+        right_area.addWidget(line)
         
         # Add object list section
         item_layout = QVBoxLayout()
@@ -393,93 +453,62 @@ class GUI(QWidget):
             item_layout.addLayout(row_layout)
         
         # Add object list to left area
-        left_area.addLayout(item_layout)
+        right_area.addLayout(item_layout)
         
         # Add separator line
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        left_area.addWidget(line)
+        right_area.addWidget(line)
         
         # Add memory gauges and controls to left area
-        left_area.addLayout(self.perm_mem_gauge_layout)
-        left_area.addLayout(self.work_mem_gauge_layout)
-        left_area.addLayout(self.long_mem_gauge_layout)
-        left_area.addLayout(self.gpu_mem_gauge_layout)
-        left_area.addLayout(self.torch_mem_gauge_layout)
-        left_area.addWidget(self.clear_all_mem_button)
-        left_area.addWidget(self.clear_non_perm_mem_button)
-        left_area.addWidget(self.clear_mask_cache_button)
-        left_area.addLayout(self.work_mem_min_layout)
-        left_area.addLayout(self.work_mem_max_layout)
-        left_area.addLayout(self.long_mem_max_layout)
-        left_area.addLayout(self.mem_every_box_layout)
+        right_area.addLayout(self.perm_mem_gauge_layout)
+        right_area.addLayout(self.work_mem_gauge_layout)
+        right_area.addLayout(self.long_mem_gauge_layout)
+        right_area.addLayout(self.gpu_mem_gauge_layout)
+        right_area.addLayout(self.torch_mem_gauge_layout)
+        right_area.addWidget(self.clear_all_mem_button)
+        right_area.addWidget(self.clear_non_perm_mem_button)
+        right_area.addWidget(self.clear_mask_cache_button)
+        right_area.addLayout(self.work_mem_min_layout)
+        right_area.addLayout(self.work_mem_max_layout)
+        right_area.addLayout(self.long_mem_max_layout)
+        right_area.addLayout(self.mem_every_box_layout)
 
         # import mask/layer
         import_area = QHBoxLayout()
         import_area.setAlignment(Qt.AlignmentFlag.AlignBottom)
         import_area.addWidget(self.import_mask_button)
         import_area.addWidget(self.import_layer_button)
-        left_area.addLayout(import_area)
+        right_area.addLayout(import_area)
 
         # Add separator line before console
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        left_area.addWidget(line)
+        right_area.addWidget(line)
 
-        # Add console to left area
-        left_area.addWidget(self.console)
+        # Add console to right area (stretch 1 so it takes remaining vertical space)
+        right_area.addWidget(self.console, 1)
 
         # Add separator line
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        left_area.addWidget(line)
+        right_area.addWidget(line)
 
-        # Export mask metrics (path + button) above Pairwise Metrics
-        mask_metrics_row = QHBoxLayout()
-        mask_metrics_row.addWidget(self.mask_metrics_filename)
-        mask_metrics_row.addWidget(self.export_mask_metrics_button)
-        left_area.addLayout(mask_metrics_row)
-        
-        # Add separator line
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        left_area.addWidget(line)
-        
-        # Add pairwise metrics section (optional: if any checkbox selected, also export pairwise .npz)
-        pairwise_label = QLabel("Pairwise Metrics")
-        pairwise_label.setStyleSheet("font-weight: bold;")
-        left_area.addWidget(pairwise_label)
-        pairwise_hint = QLabel("Also export pairwise (.npz) when any is selected")
-        pairwise_hint.setStyleSheet("color: gray; font-size: 11px;")
-        left_area.addWidget(pairwise_hint)
-        
-        # Create checkboxes for pairwise metrics
-        self.pairwise_metrics_group = QGroupBox()
-        pairwise_layout = QVBoxLayout()
-        
-        self.distance_cb = QCheckBox("Distance between centroids")
-        self.overlap_cb = QCheckBox("Overlap ratio")
-        self.contact_cb = QCheckBox("Contact length")
-        
-        # Unchecked by default: only mask metrics (CSV) are exported; if any is selected, pairwise (.npz) is also exported
-        self.distance_cb.setChecked(False)
-        self.overlap_cb.setChecked(False)
-        self.contact_cb.setChecked(False)
-        
-        pairwise_layout.addWidget(self.distance_cb)
-        pairwise_layout.addWidget(self.overlap_cb)
-        pairwise_layout.addWidget(self.contact_cb)
-        
-        self.pairwise_metrics_group.setLayout(pairwise_layout)
-        left_area.addWidget(self.pairwise_metrics_group)
+        # Export: open dialog for mask metrics, video export, binary masks
+        self.export_dialog_button = QPushButton('Export…')
+        self.export_dialog_button.setToolTip('Mask metrics, visualization video, binary masks')
+        self.export_dialog_button.clicked.connect(self._show_export_dialog)
+        right_area.addWidget(self.export_dialog_button)
 
-        # Wrap left_area in a widget and put it in a scroll area for small screens
+        # Export dialog (created after layout so controller is fully set up)
+        self.export_dialog = ExportDialog(self, controller, cfg)
+
+        # Wrap right_area in a widget and put it in a scroll area for small screens
         left_panel_widget = QWidget()
-        left_panel_widget.setLayout(left_area)
+        left_panel_widget.setLayout(right_area)
         left_scroll_area = QScrollArea()
         left_scroll_area.setWidget(left_panel_widget)
         left_scroll_area.setWidgetResizable(False)  # Keep natural size so scrollbars appear when needed
@@ -734,16 +763,19 @@ class GUI(QWidget):
     def forward_propagation_start(self):
         self.backward_run_button.setEnabled(False)
         self.forward_step_button.setEnabled(False)
+        self.forward_step_run_button.setEnabled(False)
         self.forward_run_button.setText('Pause propagation')
 
     def forward_propagation_step(self):
         self.forward_run_button.setEnabled(False)
         self.backward_run_button.setEnabled(False)
+        self.forward_step_run_button.setEnabled(False)
         self.forward_step_button.setText('Pause step')
 
     def backward_propagation_start(self):
         self.forward_run_button.setEnabled(False)
         self.forward_step_button.setEnabled(False)
+        self.forward_step_run_button.setEnabled(False)
         self.backward_run_button.setText('Pause propagation')
 
     def pause_propagation(self):
@@ -751,6 +783,7 @@ class GUI(QWidget):
         print("GUI: Pausing propagation")
         self.forward_run_button.setEnabled(True)
         self.forward_step_button.setEnabled(True)
+        self.forward_step_run_button.setEnabled(True)
         self.backward_run_button.setEnabled(True)
         self.clear_all_mem_button.setEnabled(True)
         self.clear_non_perm_mem_button.setEnabled(True)
@@ -855,3 +888,9 @@ class GUI(QWidget):
         
         dialog.setLayout(layout)
         dialog.exec()
+
+    def _show_export_dialog(self):
+        """Open the Export dialog (modeless)."""
+        self.export_dialog.show()
+        self.export_dialog.raise_()
+        self.export_dialog.activateWindow()

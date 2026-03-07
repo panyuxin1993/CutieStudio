@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 from cutie.utils.palette import davis_palette_np
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Callable
 import concurrent.futures
 from functools import lru_cache
 import multiprocessing as mp
@@ -226,7 +226,7 @@ def calculate_mask_metrics(mask_path: str, num_objects: int = None, object_names
     else:
         return pd.DataFrame()
 
-def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, object_names: List[str] = None, previous_df: pd.DataFrame = None) -> pd.DataFrame:
+def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, object_names: List[str] = None, previous_df: pd.DataFrame = None, progress_callback: Optional[Callable[[float], None]] = None) -> pd.DataFrame:
     """
     Calculate metrics for all masks in a folder using soft masks.
     If previous_df is provided, only calculate metrics for frames that haven't been calculated yet
@@ -237,6 +237,7 @@ def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, obje
         num_objects: Number of objects to expect
         object_names: Optional list of object names
         previous_df: Optional DataFrame with previously calculated metrics
+        progress_callback: Optional callable(progress: float) with progress in [0, 1], called during calculation
         
     Returns:
         DataFrame containing metrics for all frames and objects
@@ -314,12 +315,15 @@ def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, obje
     
     # Process frames that need calculation
     new_metrics = []
-    for frame_idx in tqdm(frames_to_calculate, desc="Processing frames"):
+    n_frames = len(frames_to_calculate)
+    for i, frame_idx in enumerate(tqdm(frames_to_calculate, desc="Processing frames")):
         # Create a dummy mask path to pass to calculate_mask_metrics
         dummy_mask_path = mask_folder / f"{frame_idx:07d}.png"
         frame_metrics = calculate_mask_metrics(str(dummy_mask_path), num_objects, object_names)
         if not frame_metrics.empty:
             new_metrics.append(frame_metrics)
+        if progress_callback is not None and n_frames > 0:
+            progress_callback((i + 1) / n_frames)
             
     if not new_metrics:
         print("WARNING: No new metrics were calculated")
