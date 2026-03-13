@@ -91,6 +91,18 @@ class ExportDialog(QDialog):
         binary_grp.setLayout(binary_layout)
         layout.addWidget(binary_grp)
 
+        # --- Export Object Dictionary ---
+        obj_grp = QGroupBox('Object Dictionary')
+        obj_layout = QVBoxLayout()
+        obj_hint = QLabel('Export mapping between object IDs and their names to object_dict.csv in the workspace')
+        obj_hint.setStyleSheet('color: gray; font-size: 11px;')
+        obj_layout.addWidget(obj_hint)
+        self.export_object_dict_button = QPushButton('Export object dict')
+        self.export_object_dict_button.clicked.connect(controller.on_export_object_dict)
+        obj_layout.addWidget(self.export_object_dict_button)
+        obj_grp.setLayout(obj_layout)
+        layout.addWidget(obj_grp)
+
         close_btn = QPushButton('Close')
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)

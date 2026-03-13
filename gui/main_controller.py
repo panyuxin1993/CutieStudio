@@ -3,6 +3,7 @@ from os import path
 import logging
 from pathlib import Path
 import time
+import csv
 import cv2
 from PIL import Image
 
@@ -1173,6 +1174,25 @@ class MainController():
             self.gui.progressbar_update(0)
         else:
             self.gui.text(f'No masks found in {mask_folder}')
+
+    def on_export_object_dict(self):
+        """Export mapping between object IDs and their names."""
+        try:
+            workspace = Path(self.cfg['workspace'])
+            output_path = workspace / 'object_dict.csv'
+
+            rows = []
+            for obj_id, name in enumerate(self.name_objects, start=1):
+                rows.append((obj_id, str(name)))
+
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['id', 'name'])
+                writer.writerows(rows)
+
+            self.gui.text(f'Exported object id-name mapping to {output_path}')
+        except Exception as e:
+            self.gui.text(f'Error exporting object dict: {e}')
 
     def on_object_dial_change(self):
         object_id = self.gui.object_dial.value()
