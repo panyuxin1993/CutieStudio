@@ -13,6 +13,14 @@ from multiprocessing import Pool, cpu_count
 import mmap
 import time
 
+from utils.mask_storage import (
+    get_frame_indices_for_workspace,
+    list_frame_indices,
+    load_frame_object_masks,
+    mask_storage_available,
+    resolve_mask_workspace,
+)
+
 def get_davis_color_mapping():
     """
     Returns the standard DAVIS dataset color mapping.
@@ -114,36 +122,20 @@ def calculate_mask_metrics(mask_path: str, num_objects: int = None, object_names
     Returns:
         DataFrame containing metrics for each object in the mask
     """
-    # Get frame index from filename
     frame_idx = int(Path(mask_path).stem)
     print(f"Processing frame {frame_idx}")
-    
-    # Initialize list to store metrics
-    metrics_list = []
-    
-    # Get soft mask directory
-    soft_mask_dir = Path(mask_path).parent.parent / 'soft_masks'
-    if not soft_mask_dir.exists():
-        print(f"ERROR: Soft masks directory not found at {soft_mask_dir}")
+
+    workspace = Path(mask_path).parent.parent
+    if num_objects is None:
+        num_objects = 100
+    object_masks = load_frame_object_masks(workspace, frame_idx, num_objects)
+    if not object_masks:
+        print(f"ERROR: No masks found for frame {frame_idx} in all_masks, soft_masks, or masks")
         return pd.DataFrame()
-    
-    # Process each object
-    for obj_id in range(1, num_objects + 1 if num_objects else 100):  # Use large default to find all objects
-        # Get soft mask path for this object
-        obj_mask_path = soft_mask_dir / str(obj_id) / f"{frame_idx:07d}.png"
-        
-        if not obj_mask_path.exists():
-            print(f"Soft mask not found for object {obj_id} in frame {frame_idx}")
-            continue
-            
-        # Read binary mask
-        mask = cv2.imread(str(obj_mask_path), cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            print(f"Failed to read mask for object {obj_id} in frame {frame_idx}")
-            continue
-            
-        # Convert to binary
-        binary_mask = (mask > 127).astype(np.uint8)
+
+    metrics_list = []
+    for obj_id in sorted(object_masks.keys()):
+        binary_mask = object_masks[obj_id]
         
         # Calculate basic metrics
         area = np.sum(binary_mask)
@@ -246,25 +238,15 @@ def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, obje
     if not mask_folder.exists():
         print(f"ERROR: Mask folder not found: {mask_folder}")
         return pd.DataFrame()
-        
-    # Get soft mask directory
-    soft_mask_dir = mask_folder.parent / 'soft_masks'
-    if not soft_mask_dir.exists():
-        print(f"ERROR: Soft masks directory not found at {soft_mask_dir}")
+
+    if not mask_storage_available(mask_folder):
+        print("ERROR: No mask data found in all_masks, soft_masks, or masks")
         return pd.DataFrame()
-        
-    # Get all frame indices from any object's soft masks
-    frame_indices = set()
-    for obj_dir in soft_mask_dir.iterdir():
-        if obj_dir.is_dir():
-            frame_indices.update([int(f.stem) for f in obj_dir.glob('*.png')])
-            
-    if not frame_indices:
-        print("ERROR: No soft mask files found")
-        return pd.DataFrame()
-        
-    frame_indices = sorted(frame_indices)
-    print(f"Found {len(frame_indices)} frames with soft masks")
+
+    dirs = resolve_mask_workspace(mask_folder)
+    frame_indices = list_frame_indices(
+        dirs['all_masks_dir'], dirs['soft_mask_dir'], dirs['mask_dir'])
+    print(f"Found {len(frame_indices)} frames with masks (all_masks, soft_masks, or masks)")
     
     # Determine which frames need calculation
     frames_to_calculate = []
@@ -404,6 +386,32 @@ def calculate_pairwise_metrics(mask1: np.ndarray, mask2: np.ndarray) -> dict:
         'contact_length': float(contact_length)
     }
 
+def _pairwise_metrics_from_object_masks(object_masks: Dict[int, np.ndarray],
+                                        num_objects: int) -> np.ndarray:
+    dtype = [
+        ('obj1', 'i4'),
+        ('obj2', 'i4'),
+        ('distance', 'f4'),
+        ('overlap_ratio', 'f4'),
+        ('contact_length', 'f4')
+    ]
+    n_pairs = (num_objects * (num_objects - 1)) // 2
+    metrics = np.zeros(n_pairs, dtype=dtype)
+    pair_idx = 0
+    for i in range(1, num_objects + 1):
+        for j in range(i + 1, num_objects + 1):
+            if i in object_masks and j in object_masks:
+                pair_metrics = calculate_pairwise_metrics(object_masks[i], object_masks[j])
+                metrics[pair_idx] = (
+                    i, j,
+                    pair_metrics['distance'],
+                    pair_metrics['overlap_ratio'],
+                    pair_metrics['contact_length'],
+                )
+            pair_idx += 1
+    return metrics
+
+
 def calculate_frame_pairwise_metrics(mask_dir: str, frame_idx: int, num_objects: int) -> np.ndarray:
     """
     Calculate pairwise metrics for all object pairs in a frame.
@@ -416,56 +424,8 @@ def calculate_frame_pairwise_metrics(mask_dir: str, frame_idx: int, num_objects:
     Returns:
         Structured numpy array containing pairwise metrics
     """
-    # Define dtype for structured array
-    dtype = [
-        ('obj1', 'i4'),
-        ('obj2', 'i4'),
-        ('distance', 'f4'),
-        ('overlap_ratio', 'f4'),
-        ('contact_length', 'f4')
-    ]
-    
-    # Initialize array for all pairs
-    n_pairs = (num_objects * (num_objects - 1)) // 2
-    metrics = np.zeros(n_pairs, dtype=dtype)
-    
-    # Get soft mask directory
-    soft_mask_dir = Path(mask_dir).parent / 'soft_masks'
-    if not soft_mask_dir.exists():
-        return metrics
-    
-    # Calculate metrics for each pair
-    pair_idx = 0
-    for i in range(1, num_objects + 1):
-        for j in range(i + 1, num_objects + 1):
-            # Read masks
-            mask1_path = soft_mask_dir / str(i) / f"{frame_idx:07d}.png"
-            mask2_path = soft_mask_dir / str(j) / f"{frame_idx:07d}.png"
-            
-            if not (mask1_path.exists() and mask2_path.exists()):
-                continue
-                
-            mask1 = cv2.imread(str(mask1_path), cv2.IMREAD_GRAYSCALE)
-            mask2 = cv2.imread(str(mask2_path), cv2.IMREAD_GRAYSCALE)
-            
-            if mask1 is None or mask2 is None:
-                continue
-                
-            # Convert to binary
-            mask1 = (mask1 > 127).astype(np.uint8)
-            mask2 = (mask2 > 127).astype(np.uint8)
-            
-            # Calculate metrics
-            pair_metrics = calculate_pairwise_metrics(mask1, mask2)
-            
-            # Store in array
-            metrics[pair_idx] = (i, j, 
-                               pair_metrics['distance'],
-                               pair_metrics['overlap_ratio'],
-                               pair_metrics['contact_length'])
-            pair_idx += 1
-    
-    return metrics
+    object_masks = load_frame_object_masks(Path(mask_dir).parent, frame_idx, num_objects)
+    return _pairwise_metrics_from_object_masks(object_masks, num_objects)
 
 def calculate_all_pairwise_metrics(mask_dir: str, num_objects: int) -> dict:
     """
@@ -480,25 +440,14 @@ def calculate_all_pairwise_metrics(mask_dir: str, num_objects: int) -> dict:
         - metrics: Dictionary mapping frame indices to metrics arrays
         - frame_indices: List of frame indices
     """
-    # Get all frame indices
-    soft_mask_dir = Path(mask_dir).parent / 'soft_masks'
-    if not soft_mask_dir.exists():
+    frame_indices = list(get_frame_indices_for_workspace(Path(mask_dir), num_objects))
+    if not frame_indices:
         return {'metrics': {}, 'frame_indices': []}
-        
-    # Get frames from first object directory
-    obj_dir = soft_mask_dir / '1'
-    if not obj_dir.exists():
-        return {'metrics': {}, 'frame_indices': []}
-        
-    frame_indices = [int(f.stem) for f in obj_dir.glob('*.png')]
-    frame_indices.sort()
-    
-    # Calculate metrics for each frame
+
     metrics = {}
     for frame_idx in frame_indices:
-        frame_metrics = calculate_frame_pairwise_metrics(mask_dir, frame_idx, num_objects)
-        metrics[frame_idx] = frame_metrics
-    
+        metrics[frame_idx] = calculate_frame_pairwise_metrics(mask_dir, frame_idx, num_objects)
+
     return {
         'metrics': metrics,
         'frame_indices': frame_indices
@@ -590,19 +539,10 @@ def calculate_all_pairwise_metrics_optimized(mask_dir: str, num_objects: int, ma
         - metrics: Dictionary mapping frame indices to metrics arrays
         - frame_indices: List of frame indices
     """
-    # Get all frame indices
-    soft_mask_dir = Path(mask_dir).parent / 'soft_masks'
-    if not soft_mask_dir.exists():
+    frame_indices = list(get_frame_indices_for_workspace(Path(mask_dir), num_objects))
+    if not frame_indices:
         return {'metrics': {}, 'frame_indices': []}
-        
-    # Get frames from first object directory
-    obj_dir = soft_mask_dir / '1'
-    if not obj_dir.exists():
-        return {'metrics': {}, 'frame_indices': []}
-        
-    frame_indices = [int(f.stem) for f in obj_dir.glob('*.png')]
-    frame_indices.sort()
-    
+
     print(f"Processing {len(frame_indices)} frames with {num_objects} objects using {max_workers} workers...")
     
     # Use parallel processing for frame calculations
@@ -641,55 +581,8 @@ def calculate_frame_pairwise_metrics_optimized(mask_dir: str, frame_idx: int, nu
     Returns:
         Structured numpy array containing pairwise metrics
     """
-    # Define dtype for structured array
-    dtype = [
-        ('obj1', 'i4'),
-        ('obj2', 'i4'),
-        ('distance', 'f4'),
-        ('overlap_ratio', 'f4'),
-        ('contact_length', 'f4')
-    ]
-    
-    # Initialize array for all pairs
-    n_pairs = (num_objects * (num_objects - 1)) // 2
-    metrics = np.zeros(n_pairs, dtype=dtype)
-    
-    # Get soft mask directory
-    soft_mask_dir = Path(mask_dir).parent / 'soft_masks'
-    if not soft_mask_dir.exists():
-        return metrics
-    
-    # Load all object masks for this frame at once
-    object_masks = {}
-    for obj_id in range(1, num_objects + 1):
-        mask_path = soft_mask_dir / str(obj_id) / f"{frame_idx:07d}.png"
-        if mask_path.exists():
-            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask is not None:
-                object_masks[obj_id] = (mask > 127).astype(np.uint8)
-    
-    if len(object_masks) < 2:
-        return metrics
-    
-    # Calculate metrics for each pair using vectorized operations
-    pair_idx = 0
-    for i in range(1, num_objects + 1):
-        for j in range(i + 1, num_objects + 1):
-            if i in object_masks and j in object_masks:
-                mask1 = object_masks[i]
-                mask2 = object_masks[j]
-                
-                # Calculate metrics using optimized function
-                pair_metrics = calculate_pairwise_metrics_optimized(mask1, mask2)
-                
-                # Store in array
-                metrics[pair_idx] = (i, j, 
-                                   pair_metrics['distance'],
-                                   pair_metrics['overlap_ratio'],
-                                   pair_metrics['contact_length'])
-            pair_idx += 1
-    
-    return metrics
+    object_masks = load_frame_object_masks(Path(mask_dir).parent, frame_idx, num_objects)
+    return calculate_frame_metrics_from_batch(object_masks, num_objects)
 
 def calculate_pairwise_metrics_optimized(mask1: np.ndarray, mask2: np.ndarray) -> dict:
     """
@@ -750,21 +643,9 @@ def calculate_pairwise_metrics_optimized(mask1: np.ndarray, mask2: np.ndarray) -
     }
 
 @lru_cache(maxsize=128)
-def get_frame_indices_cached(soft_mask_dir: str, obj_id: int) -> Tuple[int, ...]:
-    """
-    Cached function to get frame indices for an object.
-    
-    Args:
-        soft_mask_dir: Path to soft masks directory
-        obj_id: Object ID
-        
-    Returns:
-        Tuple of frame indices
-    """
-    obj_dir = Path(soft_mask_dir) / str(obj_id)
-    if not obj_dir.exists():
-        return ()
-    return tuple(int(f.stem) for f in obj_dir.glob('*.png'))
+def get_frame_indices_cached(mask_dir: str, num_objects: int) -> Tuple[int, ...]:
+    """Cached frame index list from all_masks or soft_masks under the workspace."""
+    return get_frame_indices_for_workspace(Path(mask_dir), num_objects)
 
 def calculate_all_pairwise_metrics_batch_optimized(mask_dir: str, num_objects: int, batch_size: int = 10) -> dict:
     """
@@ -778,19 +659,10 @@ def calculate_all_pairwise_metrics_batch_optimized(mask_dir: str, num_objects: i
     Returns:
         Dictionary containing metrics and frame indices
     """
-    # Get all frame indices
-    soft_mask_dir = Path(mask_dir).parent / 'soft_masks'
-    if not soft_mask_dir.exists():
+    frame_indices = list(get_frame_indices_for_workspace(Path(mask_dir), num_objects))
+    if not frame_indices:
         return {'metrics': {}, 'frame_indices': []}
-        
-    # Get frames from first object directory
-    obj_dir = soft_mask_dir / '1'
-    if not obj_dir.exists():
-        return {'metrics': {}, 'frame_indices': []}
-        
-    frame_indices = [int(f.stem) for f in obj_dir.glob('*.png')]
-    frame_indices.sort()
-    
+
     print(f"Processing {len(frame_indices)} frames in batches of {batch_size}...")
     print(f"Total batches: {(len(frame_indices) + batch_size - 1) // batch_size}")
     
@@ -804,7 +676,7 @@ def calculate_all_pairwise_metrics_batch_optimized(mask_dir: str, num_objects: i
         print(f"Processing batch {batch_start//batch_size + 1}: frames {batch_start}-{batch_end-1}")
         
         # Load all masks for this batch at once
-        batch_masks = load_batch_masks(soft_mask_dir, batch_frames, num_objects)
+        batch_masks = load_batch_masks(Path(mask_dir), batch_frames, num_objects)
         
         # Process each frame in the batch
         for frame_idx in batch_frames:
@@ -829,47 +701,15 @@ def calculate_all_pairwise_metrics_batch_optimized(mask_dir: str, num_objects: i
         'frame_indices': frame_indices
     }
 
-def load_batch_masks(soft_mask_dir: Path, frame_indices: List[int], num_objects: int) -> Dict[int, Dict[int, np.ndarray]]:
-    """
-    Load all object masks for a batch of frames with optimized I/O.
-    
-    Args:
-        soft_mask_dir: Path to soft masks directory
-        frame_indices: List of frame indices to load
-        num_objects: Number of objects
-        
-    Returns:
-        Dictionary mapping frame_idx to object_masks dictionary
-    """
+def load_batch_masks(mask_dir: Path, frame_indices: List[int],
+                     num_objects: int) -> Dict[int, Dict[int, np.ndarray]]:
+    """Load object masks for a batch of frames (all_masks preferred, then soft_masks)."""
+    workspace = Path(mask_dir).parent
     batch_masks = {}
-    
-    # Pre-check which files exist to avoid repeated path operations
-    existing_files = {}
     for frame_idx in frame_indices:
-        existing_files[frame_idx] = {}
-        for obj_id in range(1, num_objects + 1):
-            mask_path = soft_mask_dir / str(obj_id) / f"{frame_idx:07d}.png"
-            if mask_path.exists():
-                existing_files[frame_idx][obj_id] = mask_path
-    
-    # Load masks in batches for better I/O performance
-    for frame_idx in frame_indices:
-        frame_masks = {}
-        for obj_id in range(1, num_objects + 1):
-            if obj_id in existing_files[frame_idx]:
-                mask_path = existing_files[frame_idx][obj_id]
-                try:
-                    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-                    if mask is not None:
-                        # Convert to binary immediately to save memory
-                        frame_masks[obj_id] = (mask > 127).astype(np.uint8)
-                except Exception as e:
-                    print(f"Warning: Failed to load mask {mask_path}: {e}")
-                    continue
-        
-        if len(frame_masks) >= 2:  # Only include frames with at least 2 objects
+        frame_masks = load_frame_object_masks(workspace, frame_idx, num_objects)
+        if len(frame_masks) >= 2:
             batch_masks[frame_idx] = frame_masks
-    
     return batch_masks
 
 def calculate_frame_metrics_from_batch(object_masks: Dict[int, np.ndarray], num_objects: int) -> np.ndarray:

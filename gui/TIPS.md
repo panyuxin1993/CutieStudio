@@ -1,97 +1,146 @@
-### Tips
+### Cutie GUI manual
 
-Core mechanism: annotate objects at one or more frames and use propagation to complete the video.
-Use permanent memory to store accurate segmentation (commit good frames to it) for best results.
-The first frame to enter the memory bank is always committed to the permanent memory.
-Reset memory if needed.
+Core workflow: annotate objects on key frames, propagate through the video, and commit good frames to **permanent memory** for stable tracking. The first frame that enters the memory bank is always committed to permanent memory. Use **Reset memory** if tracking drifts.
 
-GUI Layout:
+---
 
-- The main canvas is in the center, showing the current frame with object masks.
-- The right panel contains the object list and memory controls:
-  - Object list shows all objects with their IDs, names, and control checkboxes
-  - "Show" checkbox controls whether an object's mask is visible in the main canvas
-  - "Track" checkbox controls whether an object is included in propagation
-  - **Logical relationship**: When "Track" is checked, "Show" is automatically checked (you want to see what you're tracking). When "Show" is unchecked, "Track" is automatically unchecked (you can't track what you can't see).
-  - Memory gauges and controls are below the object list:
-    - "Reset all memory" clears both permanent and temporary memory
-    - "Reset non-permanent memory" clears only temporary memory
-    - "Clear mask cache" frees memory by clearing cached mask data
-  - The 'manual' buttom will show tips 
-  - console output
-- The bottom panel contains frame navigation and propagation controls
-  - there are two options to propagate, with or without 'step': 
-  - with 'step' propagation will clear memory after inferencing each frame
-  - without 'step' propagation is the traditional one that will have memory
-- TIP: 
-  - when rat cross a tube or something that will partially occlude the rat, causing split body parts, use 'propagate_forward'
-  - when rat stay still, especially when a passenger rat run nearby, use 'step_propagate_forward', since the 'propagate_forward' may track the running one
-  - when ratA chase ratB, use 'step_propagate_forward' to track ratA and use 'propagate_forward' to track ratB
-- The export panel contains additional controls:
-  - Mask metrics export controls
-  - Pairwise metrics controls with checkboxes for different metric types
-  - Save soft mask toggle for tracking
-  - Include all visible objects in combined masks toggle - when enabled, includes all visible objects in combined masks
+### Object controls (Show / Track)
 
-Controls:
+Each object has two checkboxes:
 
-- Use left-click for foreground annotation and right-click for background annotation.
-- Use number keys or the spinbox to change the object to be operated on. If it does not respond, most likely the correct number of objects was not specified during program startup.
-- Use left/right arrows to move between frames, shift+arrow to move by 10 frames, and alt/option+arrow to move to the start/end.
-- Use F/space and B to propagate forward and backward, respectively.
-- Use C to commit a frame to permanent memory.
-- **Reset buttons**:
-  - "Reset frame" clears all masks in the current frame (removes soft masks from disk and updates display immediately)
-  - "Reset object" clears only the current object's masks in the current frame (removes soft mask from disk and updates display immediately)
-  - Both buttons now provide immediate visual feedback - masks disappear from the display right away
-- **Object visibility and tracking controls**: The "Show" and "Track" checkboxes are logically linked:
-  - Checking "Track" automatically checks "Show" (you want to see what you're tracking)
-  - Unchecking "Show" automatically unchecks "Track" (you can't track what you can't see)
-  - You can uncheck "Track" without affecting "Show" (allows showing objects without tracking them)
-- Memory can be corrupted by bad segmentations. Make good use of "reset memory" and do not commit bad segmentations.
-- "Export as video" only aggregates visualizations that are saved on disks. You need to check "save overlay" for that to happen.
+| Checkbox | Meaning |
+|----------|---------|
+| **Show** | Include this object in the **on-screen overlay** when browsing or propagating. |
+| **Track** | Include this object in **inference** (propagation and `masks/` saves). |
 
-Memory Management:
+**Rules:**
 
-- "Reset all memory" completely clears the model's memory, including permanent memory. Use this when you want to start fresh.
-- "Reset non-permanent memory" clears temporary memory while preserving permanent memory. Use this to free up memory without losing committed frames.
-- "Clear mask cache" removes cached mask data from memory to free up RAM. This is useful for long videos or when working with limited memory. The cache will be rebuilt as needed when you navigate to frames.
+- Checking **Track** automatically checks **Show**.
+- Unchecking **Show** automatically unchecks **Track**.
+- You may uncheck **Track** while leaving **Show** checked (visible but not propagated).
 
-Visualizations:
+When you change Show or Track, the app rebuilds **`all_masks`** for the current frame (all objects for display), then updates **`masks/`** (tracked objects only for inference).
 
-- Middle-click on target objects to toggle some visualization effects (for layered, popout, RGBA, and binary mask export).
-- Soft masks are saved in the 'soft_masks' directory, with one subdirectory per object
-- Combined masks are saved in the 'all_masks' directory, containing all objects in a single mask
-- **Propagation logic**: During propagation, tracked objects from current probabilities are shown first, followed by existing soft masks for untracked objects (if enabled)
-- Soft masks are only saved for the "propagated" frames, not for the interacted frames. To save all frames, utilize forward and backward propagation.
-- The "Include all visible objects in combined masks" checkbox controls whether combined masks include all visible objects or only tracked objects:
-  - When enabled (default): Combined masks include tracked objects from current probabilities plus existing soft masks for untracked objects
-  - When disabled: Combined masks only include tracked objects from current probabilities
-  - Soft masks are always saved only for tracked objects to prevent overwriting existing data for untracked objects
-  - This allows you to visualize all objects while preserving existing soft masks for objects that are visible but not tracked
-- During tracking (propagation), all visible objects are now shown in real-time, including untracked objects with existing soft masks
-- Real-time visualization now works correctly regardless of whether previous results exist or not
-- All tracked objects are now visible during propagation, even when some objects have existing soft masks and others don't
-- For some visualizations (layered and RGBA), the images saved during propagation will be higher quality with soft edges. This is because we have access to the soft mask only during propagation. Set the save visualization mode to "Propagation only" to only save during propagation.
-- The "layered" visualization mode inserts an RGBA layer between the foreground and the background. Use "import layer" to select a new layer.
+---
 
-Exporting:
+### Mask storage (workspace)
 
-- Exported binary/soft masks can be used in other applications like ProPainter. Note inpainting prefer over-segmentation over under-segmentation -- use a larger dilation radius if needed
-- Mask metrics can be exported to CSV format, including area, perimeter, circularity, and orientation metrics
-- Pairwise metrics can be exported to NPZ format, including:
-  - Distance between object centroids
-  - Overlap ratio between objects
-  - Contact length between objects
-- Use the checkboxes to select which pairwise metrics to calculate and save
+| Location | Contents | Used for |
+|----------|----------|----------|
+| **`masks/`** | Single indexed PNG per frame | Inference input; **tracked objects only** |
+| **`all_masks/`** | Multi-channel `{frame}.npz` (one channel per object ID) | Overlay when browsing, mask metrics export, flexible propagation saves |
+| **`soft_masks/{id}/`** | Legacy per-object PNGs | Fallback if `all_masks` is missing |
 
-About:
-This project is a customized fork of Cutie (hkchengrex/Cutie) with additional features for mask analysis and visualization. 
-Major improvements include:
-- Enhanced mask metrics and analysis
-- Pairwise object metrics
-- Improved object visibility and tracking
-- Advanced mask visualization options
-- Extended export capabilities
+**Browsing (slider / frame dial):** The overlay is built from **`all_masks` + Show**, not directly from `masks/`. After fast propagation (which only wrote `masks/`), the first visit to a frame may build `all_masks` from disk sources.
 
-Original project: hkchengrex/Cutie
+---
+
+### Propagation modes
+
+The status line shows which mode is active, for example `[fast (masks only)]` or `[flexible (all_masks, fast overlay)]`.
+
+**Save mode (disk I/O during propagation)**
+
+| Condition | Label | What is saved each frame |
+|-----------|--------|---------------------------|
+| All objects **tracked and shown** | `fast (masks only)` | `masks/` only (fastest) |
+| Otherwise | `flexible (all_masks, ...)` | `masks/` + **`all_masks/`** NPZ (if "Save soft mask" is checked) |
+
+**Overlay mode (display speed during propagation)**
+
+| Condition | Overlay path |
+|-----------|----------------|
+| **Track** set equals **Show** set | **Fast GPU overlay** from live probabilities (same idea as full fast mode) |
+| Untracked-but-visible objects exist | **Full compose** - loads/merges `all_masks`, slower but correct |
+
+**Tips for speed**
+
+- Uncheck **Save soft mask** to skip `all_masks` writes (fastest flexible run).
+- Uncheck **Include all visible objects in combined masks** to avoid reading previous NPZ when saving `all_masks`.
+- **Save visualization** is not written frame-by-frame during propagation (export rebuilds overlays). Use **None** while propagating; use **Always** when scrubbing if you want preview images on disk.
+
+**Console timing:** After propagation, the console prints average ms/frame for `inference`, `save`, `visualize`, and `ui` (e.g. `GUI: Propagation complete (N frames) avg ms/frame: ...`). Every 100 frames, a running average is printed. To see Python log lines as well, start the app with `--log-level INFO`.
+
+---
+
+### Propagation buttons
+
+- **Propagate forward / backward** - standard propagation with memory carried across frames.
+- **Step forward** - advance one frame without full propagation loop.
+- **Propagate step forward** - propagate one frame and **clear memory** each step (useful when objects cross or occlude; reduces swapping IDs).
+
+**Heuristics (rats / occlusion):**
+
+- Partial occlusion / split body: try **Propagate forward**.
+- Static subject + nearby motion: try **Propagate step forward** for the static animal.
+- Chase scenarios: step-forward on one rat, full forward on the other.
+
+---
+
+### GUI layout
+
+- **Center:** main canvas (current frame + mask overlay).
+- **Right:** object list (Show / Track), memory gauges, **Manual**, console.
+- **Bottom:** timeline slider, frame dial, propagation buttons, visualization mode, export-related toggles.
+- **Export...** dialog: mask metrics, visualization video, binary masks.
+
+---
+
+### Controls
+
+- **Left-click** - foreground; **right-click** - background.
+- **Number keys** or object spinbox - active object (must match `--num_objects` at startup).
+- **Arrow keys** - prev/next frame; **Shift+arrow** - +/-10 frames; **Alt+arrow** - first/last frame.
+- **F / Space** - propagate forward; **B** - propagate backward.
+- **C** - commit current frame to permanent memory.
+- **Middle-click** on canvas - toggle overlay target objects (popup, layer, RGBA, binary export).
+- **Reset frame** - clear all masks on current frame (disk + display).
+- **Reset object** - clear current object on current frame.
+
+**Memory**
+
+- **Reset all memory** - permanent + temporary.
+- **Reset non-permanent memory** - temporary only.
+- **Clear mask cache** - free RAM; masks reload from disk when needed.
+
+---
+
+### Overlay options
+
+Visualization mode combo: `mask`, `davis`, `fade`, `light`, `popup`, `layer`, `rgba`.
+
+**Save visualization** combo:
+
+| Setting | Behavior |
+|---------|----------|
+| **None** | No automatic overlay files on disk |
+| **Always** | Save overlay when viewing frames (not during propagation) |
+| **Propagation only** | Same as None during propagation; use **Export video** to regenerate |
+
+**Export as video** rebuilds visualization images from **`all_masks` / `soft_masks`** (all objects on disk) before encoding - you do not need per-frame saves during propagation.
+
+**Layer mode:** use **Import layer** to insert an RGBA image between foreground and background.
+
+---
+
+### Export
+
+- **Mask metrics** - reads **`all_masks`** when present (falls back to `soft_masks`).
+- **Pairwise metrics** - NPZ with distance, overlap, contact length (select metrics in export dialog).
+- **Binary / soft masks** - for tools like ProPainter (inpainting often prefers slight over-segmentation; increase dilation if needed).
+
+---
+
+### Command-line (optional)
+
+```text
+python interactive_gui.py --workspace PATH --num_objects N [--log-level INFO]
+```
+
+`--log-level INFO` enables extra propagation timing lines in the terminal in addition to the GUI console messages.
+
+---
+
+### About
+
+Customized fork of [Cutie](https://github.com/hkchengrex/Cutie) with multi-object Show/Track control, combined **`all_masks`** storage, mask/pairwise metrics export, and flexible vs fast propagation paths.

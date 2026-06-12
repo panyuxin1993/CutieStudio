@@ -30,6 +30,12 @@ def get_arguments():
     parser.add_argument('--workspace_init_only', action='store_true',
                         help='initialize the workspace and exit')
     parser.add_argument('--name_objects', nargs='+', type=str, help='A list of strings', default=[])
+    parser.add_argument(
+        '--log-level',
+        default='WARNING',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='Console logging level (use INFO to see propagation timing summaries)',
+    )
 
     args = parser.parse_args()
     return args
@@ -38,6 +44,13 @@ def get_arguments():
 if __name__ in "__main__":
     # input arguments
     args = get_arguments()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(levelname)s %(name)s: %(message)s',
+        force=True,
+    )
+    logging.getLogger('numexpr.utils').setLevel(logging.WARNING)
 
     # perform slow imports after parsing args
     import torch

@@ -9,7 +9,7 @@ mask_endpoint: masks
 vis_endpoint: vis
 
 amp: True
-weights: weights/ratcity_Cutie_2.pth
+weights: weights/rats_DAVIS1.pth  
 ritm_weights: weights/coco_lvis_h18_itermask.pth
 
 # All "size" parameters represent the length of the shorter edge
@@ -23,7 +23,7 @@ max_overall_size: 1080
 buffer_size: 20
 
 # we use multithreading for saving the results
-save_queue_size: 20
+save_queue_size: 128
 num_save_threads: 4
 
 # for reading

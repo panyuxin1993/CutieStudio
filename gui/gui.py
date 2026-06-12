@@ -142,12 +142,18 @@ class GUI(QWidget):
 
         # Initialize save soft mask checkbox first
         self.save_soft_mask_checkbox = QCheckBox(self)
-        self.save_soft_mask_checkbox.setChecked(True)  # Default to saving soft masks
+        self.save_soft_mask_checkbox.setChecked(False)
+        self.save_soft_mask_checkbox.setToolTip(
+            'Save combined all_masks NPZ during propagation (flexible mode). '
+            'Does not write per-object soft_masks PNGs. Uncheck for faster propagation.')
         self.save_soft_mask_checkbox.toggled.connect(controller.on_save_soft_mask_toggle)
 
         # Add checkbox for saving all visible objects
         self.save_all_visible_checkbox = QCheckBox(self)
         self.save_all_visible_checkbox.setChecked(cfg.get('performance', {}).get('save_all_visible', True))
+        self.save_all_visible_checkbox.setToolTip(
+            'When saving soft masks, include untracked but visible objects in combined all_masks. '
+            'Uncheck to skip extra disk reads during save.')
         self.save_all_visible_checkbox.toggled.connect(controller.on_save_all_visible_toggle)
 
         # set up some buttons
@@ -304,7 +310,7 @@ class GUI(QWidget):
         self.tips.setReadOnly(True)
         self.tips.setTextInteractionFlags(Qt.NoTextInteraction)
         self.tips.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        with open(Path(__file__).parent / 'TIPS.md', 'r') as f:
+        with open(Path(__file__).parent / 'TIPS.md', 'r', encoding='utf-8') as f:
             self.tips.setMarkdown(f.read())
 
         # Manual button
@@ -526,7 +532,7 @@ class GUI(QWidget):
         left_scroll_area.setWidgetResizable(False)  # Keep natural size so scrollbars appear when needed
         left_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        left_scroll_area.setMinimumWidth(320)
+        left_scroll_area.setMinimumWidth(300)
 
         # Drawing area main canvas
         draw_area = QHBoxLayout()
@@ -707,12 +713,10 @@ class GUI(QWidget):
 
     def update_slider(self, value):
         """Update slider value and display"""
-        print(f"Updating slider to value: {value}")
         self.tl_slider.setValue(value)
         # Update frame dial to keep it in sync (it will show "value / total" automatically via suffix)
         if hasattr(self, 'frame_dial'):
             self.frame_dial.setValue(value)
-        print(f"Slider updated to: {self.tl_slider.value()}")
 
     def pixel_pos_to_image_pos(self, x, y):
         # Un-scale and un-pad the label coordinates into image coordinates

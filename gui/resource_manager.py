@@ -17,7 +17,7 @@ import numpy as np
 from cutie.utils.palette import davis_palette, davis_palette_np
 from tqdm import tqdm
 
-log = logging.getLogger()
+log = logging.getLogger(__name__)
 
 
 # https://bugs.python.org/issue28178
@@ -176,22 +176,13 @@ class ResourceManager:
             if args is None:
                 queue.task_done()
                 break
-            print(f"Processing save item: type={args.type}, name={args.name}")
+            log.debug('Processing save item: type=%s name=%s', args.type, args.name)
             if args.type == 'mask':
                 # PIL image
                 args.data.save(path.join(self.mask_dir, args.name + '.png'))
             elif args.type.startswith('visualization'):
-                # numpy array, save with cv2
                 vis_mode = args.type.split('_')[-1]
-                os.makedirs(path.join(self.visualization_dir, vis_mode), exist_ok=True)
-                if vis_mode == 'rgba':
-                    data = cv2.cvtColor(args.data, cv2.COLOR_RGBA2BGRA).copy()
-                    cv2.imwrite(path.join(self.visualization_dir, vis_mode, args.name + '.png'),
-                                data)
-                else:
-                    data = cv2.cvtColor(args.data, cv2.COLOR_RGB2BGR)
-                    cv2.imwrite(path.join(self.visualization_dir, vis_mode, args.name + '.jpg'),
-                                data)
+                self._write_visualization_file(vis_mode, args.data, args.name)
             elif args.type == 'soft_mask':
                 # numpy array, save each channel with cv2
                 print(f"Saving soft mask for {args.name}")
@@ -211,33 +202,30 @@ class ResourceManager:
             queue.task_done()
 
     def _save_batch_soft_masks(self, batch_data: Dict, frame_name: str):
-        """Optimized batch saving of soft masks with multi-channel format for overlapping masks"""
+        """Save all_masks NPZ from in-memory probabilities; optionally legacy per-object PNGs."""
         try:
             frame_idx = batch_data.get('frame_idx')
-            soft_masks = batch_data.get('soft_masks', {})  # {obj_id: mask_array}
+            soft_masks = batch_data.get('soft_masks', {})
             tracked_objects = batch_data.get('tracked_objects', set())
             save_all_visible = batch_data.get('save_all_visible', True)
-            
-            # Save individual soft masks for tracked objects only (binary format)
-            for obj_id, mask_array in soft_masks.items():
-                # Only save if object is tracked
-                if obj_id in tracked_objects:
-                    save_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
-                    cv2.imwrite(save_path, binary_mask)
-            
-            # Create fixed-size multi-channel mask (num_objects, H, W)
-            # Channel i-1 always corresponds to object ID i
-            # Get dimensions from first soft mask or use default
+            skip_disk_fallback = batch_data.get('skip_disk_fallback', False)
+            all_masks_only = batch_data.get('all_masks_only', True)
+
+            if not all_masks_only:
+                for obj_id, mask_array in soft_masks.items():
+                    if obj_id in tracked_objects:
+                        save_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
+                        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                        binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
+                        cv2.imwrite(save_path, binary_mask)
+
             h, w = None, None
             if soft_masks:
                 first_mask = next(iter(soft_masks.values()))
                 h, w = first_mask.shape
             elif hasattr(self, 'height') and hasattr(self, 'width'):
                 h, w = self.height, self.width
-            else:
-                # Try to get dimensions from an existing soft mask
+            elif not all_masks_only:
                 for obj_id in range(1, self.num_objects + 1):
                     existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
                     if os.path.exists(existing_mask_path):
@@ -245,38 +233,47 @@ class ResourceManager:
                         if existing_mask is not None:
                             h, w = existing_mask.shape
                             break
-            
+            else:
+                npz_path = os.path.join(self.all_masks_dir, f'{frame_idx:07d}.npz')
+                if os.path.exists(npz_path):
+                    try:
+                        prev = np.load(npz_path)['mask']
+                        h, w = prev.shape[1], prev.shape[2]
+                    except Exception:
+                        pass
+
             if h is None or w is None:
-                print(f"Warning: Could not determine dimensions for frame {frame_idx}, skipping all_masks update")
+                log.warning('Could not determine dimensions for frame %d, skipping all_masks', frame_idx)
                 return
-            
-            # Create fixed-size multi-channel mask: (num_objects, H, W)
-            # Channel i-1 corresponds to object ID i
-            # Use uint8 (0 or 1) instead of float32 to reduce file size by 4x
+
+            existing_multi = None
+            npz_path = os.path.join(self.all_masks_dir, f'{frame_idx:07d}.npz')
+            if save_all_visible and not skip_disk_fallback and os.path.exists(npz_path):
+                try:
+                    existing_multi = np.load(npz_path)['mask']
+                except Exception:
+                    existing_multi = None
+
             multi_channel_mask = np.zeros((self.num_objects, h, w), dtype=np.uint8)
-            
-            # Fill channels with masks from tracked objects (current probabilities)
+
             for obj_id in range(1, self.num_objects + 1):
-                channel_idx = obj_id - 1  # Channel 0 = object 1, channel 1 = object 2, etc.
-                
+                channel_idx = obj_id - 1
+
                 if obj_id in tracked_objects and obj_id in soft_masks:
-                    # Use current probability mask for tracked objects
                     mask_array = soft_masks[obj_id]
-                    # Resize if dimensions don't match
                     if mask_array.shape != (h, w):
                         mask_array = cv2.resize(mask_array, (w, h), interpolation=cv2.INTER_LINEAR)
-                    # Convert probability to binary (0 or 1)
                     multi_channel_mask[channel_idx] = (mask_array > 0.5).astype(np.uint8)
-                elif save_all_visible or obj_id in tracked_objects:
-                    # Load from existing soft mask for untracked objects (if save_all_visible) or tracked objects without current prob
+                elif save_all_visible and existing_multi is not None and channel_idx < existing_multi.shape[0]:
+                    multi_channel_mask[channel_idx] = (existing_multi[channel_idx] > 0).astype(np.uint8)
+                elif ((save_all_visible or obj_id in tracked_objects) and not skip_disk_fallback
+                      and not all_masks_only):
                     existing_mask_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
                     if os.path.exists(existing_mask_path):
                         existing_mask = cv2.imread(existing_mask_path, cv2.IMREAD_GRAYSCALE)
                         if existing_mask is not None:
-                            # Resize if dimensions don't match
                             if existing_mask.shape != (h, w):
                                 existing_mask = cv2.resize(existing_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-                            # Convert binary mask to uint8 (0 or 1)
                             multi_channel_mask[channel_idx] = (existing_mask > 127).astype(np.uint8)
             
             # Save multi-channel mask as compressed .npz file (much smaller than .npy)
@@ -286,7 +283,9 @@ class ResourceManager:
             # Count how many objects have non-zero masks
             non_empty_channels = np.sum([np.any(multi_channel_mask[i] > 0) for i in range(self.num_objects)])
             file_size = os.path.getsize(npz_path) / 1024  # Size in KB
-            print(f"Saved all_masks for frame {frame_idx}: {non_empty_channels}/{self.num_objects} objects have masks (shape: {multi_channel_mask.shape}, dtype: {multi_channel_mask.dtype}, size: {file_size:.1f} KB)")
+            log.debug(
+                'Saved all_masks for frame %d: %d/%d objects (%.1f KB)',
+                frame_idx, non_empty_channels, self.num_objects, file_size)
             
             # Cache the multi-channel mask if enabled (store as uint8 to save memory)
             if self.enable_mask_cache and self.mask_cache is not None:
@@ -306,20 +305,14 @@ class ResourceManager:
             self._fallback_individual_saving(batch_data)
 
     def _fallback_individual_saving(self, batch_data: Dict):
-        """Fallback method for individual soft mask saving if batch saving fails"""
+        """Fallback: retry all_masks save without per-object PNGs."""
         try:
+            fallback_data = dict(batch_data)
+            fallback_data['all_masks_only'] = True
             frame_idx = batch_data.get('frame_idx')
-            soft_masks = batch_data.get('soft_masks', {})
-            tracked_objects = batch_data.get('tracked_objects', set())
-            
-            for obj_id, mask_array in soft_masks.items():
-                if obj_id in tracked_objects:
-                    save_path = os.path.join(self.soft_mask_dir, f'{obj_id}', f'{frame_idx:07d}.png')
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    binary_mask = (mask_array > 0.5).astype(np.uint8) * 255
-                    cv2.imwrite(save_path, binary_mask)
+            self._save_batch_soft_masks(fallback_data, self.names[frame_idx])
         except Exception as e:
-            print(f"Error in fallback individual saving: {str(e)}")
+            log.warning('Error in fallback all_masks saving: %s', e)
 
     def _extract_frames(self, video: str):
         cap = cv2.VideoCapture(video)
@@ -359,11 +352,16 @@ class ResourceManager:
 
     def add_to_queue_with_warning(self, item: SaveItem):
         if self.save_queue.full():
-            print(
-                'The save queue is full! You need more threads or faster IO. Program might pause.')
-        self.save_queue.put(item)
+            log.debug('Save queue full (%d items), waiting for IO threads',
+                      self.save_queue.qsize())
+        self.save_queue.put(item, block=True)
 
-    def save_mask(self, ti: int, mask: np.ndarray, tracked_objects: set = None):
+    def wait_for_save_queue(self):
+        """Block until all queued save tasks have been processed."""
+        self.save_queue.join()
+
+    def save_mask(self, ti: int, mask: np.ndarray, tracked_objects: set = None,
+                  invalidate_cache: bool = True):
         """Save mask to masks folder for inference (ONLY tracked objects)
         
         IMPORTANT: This saves single-channel masks with ONLY tracked objects to prevent
@@ -412,10 +410,21 @@ class ResourceManager:
             # If palette is already in correct format, use directly
             mask_img.putpalette(self.palette)
             
-        self.invalidate(ti)
+        if invalidate_cache:
+            self.invalidate(ti)
         self.add_to_queue_with_warning(SaveItem('mask', mask_img, self.names[ti]))
 
-    def save_mask_sync(self, ti: int, mask: np.ndarray, tracked_objects: set = None):
+    def _write_visualization_file(self, vis_mode: str, image: np.ndarray, name: str):
+        os.makedirs(path.join(self.visualization_dir, vis_mode), exist_ok=True)
+        if vis_mode == 'rgba':
+            data = cv2.cvtColor(image, cv2.COLOR_RGBA2BGRA).copy()
+            cv2.imwrite(path.join(self.visualization_dir, vis_mode, name + '.png'), data)
+        else:
+            data = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(path.join(self.visualization_dir, vis_mode, name + '.jpg'), data)
+
+    def save_mask_sync(self, ti: int, mask: np.ndarray, tracked_objects: set = None,
+                       invalidate_cache: bool = True):
         """Save mask to masks folder synchronously (writes directly to disk).
         Same semantics as save_mask but does not use the queue. Use when masks must be on disk immediately.
         """
@@ -439,21 +448,21 @@ class ResourceManager:
             mask_img.putpalette(palette_list)
         else:
             mask_img.putpalette(self.palette)
-        self.invalidate(ti)
+        if invalidate_cache:
+            self.invalidate(ti)
         mask_path = path.join(self.mask_dir, self.names[ti] + '.png')
         mask_img.save(mask_path)
 
     def save_visualization(self, ti: int, vis_mode: str, image: np.ndarray):
-        # image should be uint8 3*H*W
         assert 0 <= ti < self.length
         assert isinstance(image, np.ndarray)
+        self.add_to_queue_with_warning(
+            SaveItem(f'visualization_{vis_mode}', image, self.names[ti]))
 
-        # Save visualization in visualization/davis folder
-        vis_dir = path.join(self.workspace, 'visualization', 'davis')
-        os.makedirs(vis_dir, exist_ok=True)
-        name = self.names[ti]
-
-        self.add_to_queue_with_warning(SaveItem(f'visualization_{vis_mode}', image, name))
+    def save_visualization_sync(self, ti: int, vis_mode: str, image: np.ndarray):
+        assert 0 <= ti < self.length
+        assert isinstance(image, np.ndarray)
+        self._write_visualization_file(vis_mode, image, self.names[ti])
 
     def save_soft_mask(self, ti: int, prob: np.ndarray, obj_id: int = None):
         """Save soft mask for a specific object or all objects as binary images"""
@@ -480,15 +489,33 @@ class ResourceManager:
         print(f"Updating all_masks for frame {ti}")
         self.update_all_masks(ti)
 
-    def save_batch_soft_masks(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set, save_all_visible: bool = True):
-        """Optimized batch saving of soft masks"""
-        batch_data = {
+    def _batch_soft_mask_data(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set,
+                              save_all_visible: bool, skip_disk_fallback: bool,
+                              all_masks_only: bool = True) -> Dict:
+        return {
             'frame_idx': ti,
             'soft_masks': soft_masks,
             'tracked_objects': tracked_objects,
-            'save_all_visible': save_all_visible
+            'save_all_visible': save_all_visible,
+            'skip_disk_fallback': skip_disk_fallback,
+            'all_masks_only': all_masks_only,
         }
+
+    def save_batch_soft_masks(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set,
+                              save_all_visible: bool = True, skip_disk_fallback: bool = False,
+                              all_masks_only: bool = True):
+        """Queue all_masks save (and optional legacy per-object soft_mask PNGs)."""
+        batch_data = self._batch_soft_mask_data(
+            ti, soft_masks, tracked_objects, save_all_visible, skip_disk_fallback, all_masks_only)
         self.add_to_queue_with_warning(SaveItem('batch_soft_mask', batch_data, self.names[ti]))
+
+    def save_batch_soft_masks_sync(self, ti: int, soft_masks: Dict[int, np.ndarray], tracked_objects: set,
+                                   save_all_visible: bool = True, skip_disk_fallback: bool = False,
+                                   all_masks_only: bool = True):
+        """Save all_masks directly without using the async queue."""
+        batch_data = self._batch_soft_mask_data(
+            ti, soft_masks, tracked_objects, save_all_visible, skip_disk_fallback, all_masks_only)
+        self._save_batch_soft_masks(batch_data, self.names[ti])
 
     def update_all_masks(self, ti: int):
         """Combine all available masks from soft_masks into fixed-size multi-channel format in all_masks
@@ -704,6 +731,35 @@ class ResourceManager:
                 del self.mask_cache[oldest_key]
                 
         return result
+
+    def write_all_masks(self, ti: int, multi_channel_mask: np.ndarray):
+        """Write fixed-size multi-channel mask to all_masks/{ti}.npz and update cache."""
+        assert 0 <= ti < self.length
+        if multi_channel_mask.shape[0] != self.num_objects:
+            raise ValueError(
+                f'Mask has {multi_channel_mask.shape[0]} channels, expected {self.num_objects}')
+        h, w = multi_channel_mask.shape[1], multi_channel_mask.shape[2]
+        if h != self.height or w != self.width:
+            resized = []
+            for ch_idx in range(multi_channel_mask.shape[0]):
+                ch = multi_channel_mask[ch_idx]
+                if ch.shape != (self.height, self.width):
+                    ch = cv2.resize(ch, (self.width, self.height), interpolation=cv2.INTER_NEAREST)
+                resized.append(ch)
+            multi_channel_mask = np.stack(resized, axis=0)
+
+        multi_uint8 = (multi_channel_mask > 0.5).astype(np.uint8)
+        npz_path = os.path.join(self.all_masks_dir, f'{ti:07d}.npz')
+        np.savez_compressed(npz_path, mask=multi_uint8)
+
+        if self.enable_mask_cache and self.mask_cache is not None:
+            self.mask_cache[ti] = {
+                'mask': multi_uint8.copy(),
+                'object_ids': list(range(1, self.num_objects + 1)),
+            }
+            if len(self.mask_cache) > self.cache_size_limit:
+                oldest_key = min(self.mask_cache.keys())
+                del self.mask_cache[oldest_key]
 
     def _get_image_unbuffered(self, ti: int):
         # returns H*W*3 uint8 array
