@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, QTimer, QSize, Signal, QThread, QEvent
 
 from cutie.utils.palette import davis_palette_np
 from gui.gui_utils import *
+from gui.iou_plot_widget import IoUPlotPanel
 from utils.mask_metrics import (calculate_mask_metrics_batch, calculate_all_pairwise_metrics,
                               save_pairwise_metrics, load_pairwise_metrics)
 
@@ -50,6 +51,15 @@ class ExportDialog(QDialog):
         mask_layout.addWidget(self.distance_cb)
         mask_layout.addWidget(self.overlap_cb)
         mask_layout.addWidget(self.contact_cb)
+        self.interpolate_mask_gaps_cb = QCheckBox(
+            'Interpolate metrics for frames between masked segments (linear, per object)'
+        )
+        self.interpolate_mask_gaps_cb.setToolTip(
+            'If mask files are missing for some frame ranges, fill gaps by linearly interpolating '
+            'between the nearest frames that have metrics for each object (e.g. 0–100 and 200–300 '
+            '→ fill 101–199). Orientation uses shortest arc.'
+        )
+        mask_layout.addWidget(self.interpolate_mask_gaps_cb)
         self.export_mask_metrics_button = QPushButton('Export Mask Metrics')
         self.export_mask_metrics_button.clicked.connect(controller.on_export_mask_metrics)
         mask_layout.addWidget(self.export_mask_metrics_button)
@@ -161,6 +171,14 @@ class GUI(QWidget):
         self.play_button.clicked.connect(self.on_play_video)
         self.commit_button = QPushButton('Commit to permanent memory')
         self.commit_button.clicked.connect(controller.on_commit)
+
+        self.submit_seed_button = QPushButton('Submit seed frame')
+        self.submit_seed_button.clicked.connect(controller.on_submit_seed_frame)
+        self.submit_seed_button.setMinimumWidth(130)
+        self.submit_seed_button.setToolTip(
+            'Copy current frame masks (tracked objects) to seed_frames/ '
+            'as anchors for bidirectional propagation.'
+        )
 
         self.forward_run_button = QPushButton('Propagate forward')
         self.forward_run_button.clicked.connect(controller.on_forward_propagation)
@@ -371,6 +389,7 @@ class GUI(QWidget):
         control_topbox.addWidget(self.forward_step_button)
         control_topbox.addWidget(self.forward_step_run_button)
         control_topbox.addWidget(self.commit_button)
+        control_topbox.addWidget(self.submit_seed_button)
         control_topbox.addWidget(self.forward_run_button)
         control_topbox.addWidget(self.backward_run_button)
         control_botbox.addWidget(self.progressbar)
@@ -543,6 +562,14 @@ class GUI(QWidget):
         layout.addLayout(draw_area)
         layout.addWidget(self.tl_slider)
         layout.addLayout(navi)
+
+        bi_cfg = cfg.get('bidirectional', {})
+        self.iou_plot_panel = IoUPlotPanel(controller, cfg, self)
+        self.iou_plot_panel.setMinimumHeight(int(bi_cfg.get('iou_plot_height', 200)))
+        self.iou_plot_panel.set_frame_count(controller.T)
+        self.iou_plot_panel.propagate_button.clicked.connect(controller.on_bidirectional_gap_fill)
+        layout.addWidget(self.iou_plot_panel)
+
         self.setLayout(layout)
 
         # timer to play video
@@ -801,6 +828,7 @@ class GUI(QWidget):
         self.forward_step_button.setEnabled(True)
         self.forward_step_run_button.setEnabled(True)
         self.backward_run_button.setEnabled(True)
+        self.iou_plot_panel.set_propagation_running(False)
         self.clear_all_mem_button.setEnabled(True)
         self.clear_non_perm_mem_button.setEnabled(True)
         self.forward_run_button.setText('Propagate forward')
@@ -808,6 +836,28 @@ class GUI(QWidget):
         self.backward_run_button.setText('propagate backward')
         self.tl_slider.setEnabled(True)  # Ensure slider is enabled after propagation
         print("Controls re-enabled")
+
+    def bidirectional_fill_start(self):
+        self.forward_run_button.setEnabled(False)
+        self.forward_step_button.setEnabled(False)
+        self.forward_step_run_button.setEnabled(False)
+        self.backward_run_button.setEnabled(False)
+        self.iou_plot_panel.set_propagation_running(True)
+        self.iou_plot_panel.set_enabled_controls(False)
+        self.commit_button.setEnabled(False)
+        self.submit_seed_button.setEnabled(False)
+        self.tl_slider.setEnabled(False)
+
+    def bidirectional_fill_end(self):
+        self.forward_run_button.setEnabled(True)
+        self.forward_step_button.setEnabled(True)
+        self.forward_step_run_button.setEnabled(True)
+        self.backward_run_button.setEnabled(True)
+        self.iou_plot_panel.set_propagation_running(False)
+        self.iou_plot_panel.set_enabled_controls(True)
+        self.commit_button.setEnabled(True)
+        self.submit_seed_button.setEnabled(True)
+        self.tl_slider.setEnabled(True)
 
     def process_events(self):
         QApplication.processEvents()

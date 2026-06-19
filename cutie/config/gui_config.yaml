@@ -9,7 +9,7 @@ mask_endpoint: masks
 vis_endpoint: vis
 
 amp: True
-weights: weights/rats_DAVIS1.pth  
+weights: weights/rats_DAVIS1.pth
 ritm_weights: weights/coco_lvis_h18_itermask.pth
 
 # All "size" parameters represent the length of the shorter edge
@@ -23,7 +23,7 @@ max_overall_size: 1080
 buffer_size: 20
 
 # we use multithreading for saving the results
-save_queue_size: 128
+save_queue_size: 20
 num_save_threads: 4
 
 # for reading
@@ -73,3 +73,15 @@ performance:
   pairwise_metrics_optimization_level: "normal" # "mega" or "normal"
   pairwise_metrics_batch_size: 50
   pairwise_metrics_max_workers: 32
+
+# Bidirectional gap fill from user-annotated seed frames
+bidirectional:
+  forward_subdir: forward_masks
+  backward_subdir: backward_masks
+  iou_table_name: iou_table.csv
+  merge_strategy: seed_proximity
+  overwrite_inferred: true
+  seed_frames_subdir: seed_frames
+  iou_plot_window_frames: 100
+  iou_plot_threshold: 0.5
+  iou_plot_height: 200

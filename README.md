@@ -45,7 +45,13 @@ CutieStudio extends the original Cutie framework with:
   - Configurable performance settings
   - Real-time performance monitoring
 
-## Installation
+- **Bidirectional Gap Fill**
+  - Submit explicit seed frames to `seed_frames/` for propagation anchors
+  - Forward/backward inference from seeds with IoU robustness metrics
+  - Interactive IoU plot with frame-range or below-threshold re-runs
+  - Merged mask output with seed-proximity selection
+
+See [gui/TIPS.md](gui/TIPS.md) for the full GUI manual.
 
 Tested on Ubuntu and windows 11.
 

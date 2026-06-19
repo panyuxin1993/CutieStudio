@@ -32,13 +32,17 @@ from gui.reader import PropagationReader, get_data_loader
 from gui.exporter import convert_frames_to_video, convert_mask_to_binary
 from scripts.download_models import download_models_if_needed
 from utils.mask_metrics import (
-    calculate_mask_metrics_batch, 
+    calculate_mask_metrics_batch,
+    interpolate_mask_metrics_gaps,
     calculate_all_pairwise_metrics, 
     calculate_all_pairwise_metrics_optimized, 
     calculate_all_pairwise_metrics_batch_optimized,
     save_pairwise_metrics
 )
 from utils.mask_storage import list_frame_indices, load_frame_object_masks, resolve_mask_workspace
+from utils.gap_filler import run_bidirectional_gap_fill
+from utils.seed_frames import list_submitted_seed_frames, submit_seed_frame
+from utils.inference_eval import load_iou_table
 from utils.performance_monitor import start_global_monitoring, stop_global_monitoring, update_global_frame_count, print_global_summary
 
 import numpy as np
@@ -139,6 +143,7 @@ class MainController():
         self.curr_object: int = 1
         self.propagating: bool = False
         self.propagate_direction: Literal['forward', 'backward', 'none'] = 'none'
+        self.bidirectional_fill_running: bool = False
         self.last_ex = self.last_ey = 0
 
         # current frame info
@@ -193,6 +198,10 @@ class MainController():
         self.gui.show()
         self.gui.text('Initialized.')
         self.initialized = True
+
+        self.gui.iou_plot_panel.point_clicked.connect(self.navigate_to_frame_and_object)
+        self._reload_iou_plot()
+        self.gui.iou_plot_panel.set_current_frame(self.curr_ti, auto_scroll=False)
 
         # Update checkbox states to reflect logical relationship
         self.update_checkbox_states()
@@ -303,8 +312,14 @@ class MainController():
                     loaded_mask = self.res_man.get_mask(self.curr_ti, tracked_objects=self.tracked_objects)
                 if loaded_mask is not None:
                     log.debug('Loaded mask from masks folder for frame %d', self.curr_ti)
+                    if loaded_mask.ndim != 2:
+                        log.warning(
+                            'Mask for frame %d has shape %s; expected 2D indexed mask',
+                            self.curr_ti, loaded_mask.shape,
+                        )
+                        loaded_mask = np.zeros((self.h, self.w), dtype=np.uint8)
                     # Filter to only tracked objects (should already be filtered, but double-check)
-                    filtered_mask = np.zeros_like(loaded_mask)
+                    filtered_mask = np.zeros((self.h, self.w), dtype=np.uint8)
                     for obj_id in self.tracked_objects:
                         filtered_mask[loaded_mask == obj_id] = obj_id
                     self.curr_mask = filtered_mask
@@ -823,7 +838,93 @@ class MainController():
         if self.res_man.get_all_masks(self.curr_ti) is None:
             self._ensure_all_masks_for_frame(self.curr_ti, include_live_state=False)
         self.show_current_frame()
-        
+        if hasattr(self.gui, 'iou_plot_panel'):
+            self.gui.iou_plot_panel.set_current_frame(self.curr_ti)
+
+    def _reload_iou_plot(self):
+        """Load IoU table from workspace if available."""
+        bi_cfg = self.cfg.get('bidirectional', {})
+        csv_name = bi_cfg.get('iou_table_name', 'iou_table.csv')
+        csv_path = Path(self.cfg['workspace']) / csv_name
+        data = load_iou_table(csv_path)
+        self.gui.iou_plot_panel.load_data(data)
+        seed_subdir = bi_cfg.get('seed_frames_subdir', 'seed_frames')
+        seeds = list_submitted_seed_frames(Path(self.cfg['workspace']), seed_subdir)
+        self.gui.iou_plot_panel.set_seed_frames(seeds)
+        if data is not None:
+            self.gui.iou_plot_panel.set_current_frame(self.curr_ti, auto_scroll=True)
+
+    def on_submit_seed_frame(self):
+        """Copy current frame masks (tracked objects) to workspace/seed_frames/."""
+        if self.bidirectional_fill_running:
+            self.gui.text('Cannot submit seed frame while bidirectional fill is running.')
+            return
+        if self.propagating:
+            self.gui.text('Stop propagation before submitting a seed frame.')
+            return
+
+        if self.curr_mask is None:
+            self.gui.text('No mask loaded for the current frame.')
+            return
+
+        object_masks = {}
+        for obj_id in self.tracked_objects:
+            binary = (self.curr_mask == obj_id).astype(np.uint8)
+            if np.any(binary):
+                object_masks[obj_id] = binary
+
+        if not object_masks:
+            self.gui.text(
+                f'Frame {self.curr_ti} has no tracked object masks. '
+                'Annotate and track objects first.'
+            )
+            return
+
+        if self.curr_frame_dirty:
+            self.save_current_mask()
+            self.curr_frame_dirty = False
+
+        workspace = Path(self.cfg['workspace'])
+        bi_cfg = self.cfg.get('bidirectional', {})
+        seed_subdir = bi_cfg.get('seed_frames_subdir', 'seed_frames')
+        try:
+            submit_seed_frame(
+                workspace,
+                self.curr_ti,
+                object_masks,
+                self.num_objects,
+                subdir=seed_subdir,
+            )
+        except Exception as e:
+            self.gui.text(f'Failed to submit seed frame: {e}')
+            return
+
+        n_objs = len(object_masks)
+        self.gui.text(
+            f'Frame {self.curr_ti} submitted as seed ({n_objs} object'
+            f'{"s" if n_objs != 1 else ""}).'
+        )
+        self._reload_iou_plot()
+
+    def navigate_to_frame_and_object(self, frame_idx: int, obj_id: int):
+        """Jump timeline and select object from IoU plot click."""
+        if frame_idx < 0 or frame_idx >= self.T:
+            return
+        if obj_id < 1 or obj_id > self.num_objects:
+            return
+
+        self.gui.tl_slider.blockSignals(True)
+        self.gui.frame_dial.blockSignals(True)
+        try:
+            self.gui.tl_slider.setValue(frame_idx)
+            self.gui.frame_dial.setValue(frame_idx)
+        finally:
+            self.gui.tl_slider.blockSignals(False)
+            self.gui.frame_dial.blockSignals(False)
+
+        self.on_slider_update()
+        self.hit_number_key(obj_id)
+        self.gui.iou_plot_panel.set_current_frame(frame_idx, auto_scroll=True)
 
     def on_forward_propagation(self):
         if self.propagating:
@@ -868,6 +969,158 @@ class MainController():
             self.gui.backward_propagation_start()
             self.propagate_direction = 'backward'
             self.on_propagate()
+
+    def on_bidirectional_gap_fill(self):
+        if self.bidirectional_fill_running:
+            self.gui.text('Bidirectional fill already running.')
+            return
+        if self.propagating:
+            self.gui.text('Stop propagation before running bidirectional fill.')
+            return
+
+        workspace = Path(self.cfg['workspace'])
+        bi_cfg = self.cfg.get('bidirectional', {})
+        seed_subdir = bi_cfg.get('seed_frames_subdir', 'seed_frames')
+        seed_frames = list_submitted_seed_frames(workspace, seed_subdir)
+        if not seed_frames:
+            self.gui.text(
+                'No submitted seed frames. Use Submit seed frame on key frames first.'
+            )
+            return
+
+        settings = self.gui.iou_plot_panel.get_propagation_settings()
+        only_low_iou = settings['only_low_iou']
+        frame_range = settings['frame_range']
+        output_frames = settings['output_frames']
+        user_start, user_end = settings['user_frame_range']
+
+        seeds_in_range = [f for f in seed_frames if user_start <= f <= user_end]
+        if not seeds_in_range:
+            self.gui.text(
+                f'No submitted seed frames in range {user_start}–{user_end}. '
+                f'Submitted seeds: {seed_frames}.'
+            )
+            return
+
+        if len(seeds_in_range) == 1:
+            self.gui.text(
+                f'One seed in range: frame {seeds_in_range[0]}. '
+                'Running forward/backward from that frame.'
+            )
+
+        if only_low_iou:
+            if not self.gui.iou_plot_panel._data:
+                self.gui.text(
+                    'No IoU data yet. Run a full-range bidirectional pass first, '
+                    'or uncheck "Only infer low IoU frames".'
+                )
+                return
+            if not output_frames:
+                self.gui.text(
+                    f'No frames have IoU below {settings["threshold"]:.2f} '
+                    f'in range {user_start}–{user_end}. '
+                    'Lower the threshold, widen the range, or uncheck '
+                    '"Only infer low IoU frames".'
+                )
+                return
+            self.gui.text(
+                f'Low-IoU mode: re-infer {len(output_frames)} frame(s) in '
+                f'{user_start}–{user_end}.'
+            )
+        else:
+            self.gui.text(
+                f'Inferring all frames in {user_start}–{user_end}.'
+            )
+
+        bi_cfg = self.cfg.get('bidirectional', {})
+        object_names = {
+            obj_id: self.name_objects[obj_id - 1]
+            for obj_id in range(1, self.num_objects + 1)
+            if obj_id - 1 < len(self.name_objects)
+        }
+
+        self.gui.bidirectional_fill_start()
+        self.gui.progressbar_update(0.0)
+        self.bidirectional_fill_running = True
+        self._bidirectional_progress_last_report = 0
+        self._bidirectional_progress_last_report_t = time.time()
+        self._bidirectional_progress_t0 = self._bidirectional_progress_last_report_t
+
+        self.bidirectional_worker = BidirectionalFillWorker(
+            workspace=workspace,
+            cfg=self.cfg,
+            tracked_object_ids=set(self.tracked_objects),
+            object_names=object_names,
+            num_objects=self.num_objects,
+            forward_subdir=bi_cfg.get('forward_subdir', 'forward_masks'),
+            backward_subdir=bi_cfg.get('backward_subdir', 'backward_masks'),
+            iou_table_name=bi_cfg.get('iou_table_name', 'iou_table.csv'),
+            merge_strategy=bi_cfg.get('merge_strategy', 'seed_proximity'),
+            overwrite_inferred=settings['overwrite_inferred'],
+            frame_range=frame_range,
+            output_frames=output_frames,
+            seed_frames=seeds_in_range,
+        )
+        self.bidirectional_thread = QThread()
+        self.bidirectional_worker.moveToThread(self.bidirectional_thread)
+        self.bidirectional_thread.started.connect(self.bidirectional_worker.run)
+        self.bidirectional_worker.finished.connect(self.bidirectional_thread.quit)
+        self.bidirectional_worker.finished.connect(self.bidirectional_worker.deleteLater)
+        self.bidirectional_thread.finished.connect(self.bidirectional_thread.deleteLater)
+        self.bidirectional_worker.progress.connect(self._on_bidirectional_progress)
+        self.bidirectional_worker.success.connect(self._on_bidirectional_success)
+        self.bidirectional_worker.error.connect(self._on_bidirectional_error)
+        self.bidirectional_thread.finished.connect(self._on_bidirectional_finished)
+        self.bidirectional_thread.start()
+
+    def _on_bidirectional_progress(self, current: int, total: int, message: str):
+        if total > 0:
+            self.gui.progressbar_update(current / total)
+
+        now = time.time()
+        if message == 'Done':
+            elapsed = now - getattr(self, '_bidirectional_progress_t0', now)
+            avg_fps = total / elapsed if elapsed > 0 and total > 0 else 0.0
+            self.gui.text(
+                f'Bidirectional fill done ({total} steps, {avg_fps:.1f} fps avg).'
+            )
+            return
+
+        if message.startswith('Starting') or current == 0:
+            self.gui.text(message)
+            if message.startswith('Starting forward'):
+                self._bidirectional_progress_t0 = now
+            self._bidirectional_progress_last_report = current
+            self._bidirectional_progress_last_report_t = now
+            return
+
+        if current - self._bidirectional_progress_last_report < 100:
+            return
+
+        elapsed = now - self._bidirectional_progress_last_report_t
+        frames_done = current - self._bidirectional_progress_last_report
+        fps = frames_done / elapsed if elapsed > 0 else 0.0
+        pct = 100.0 * current / total if total > 0 else 0.0
+        self.gui.text(
+            f'Bidirectional fill: {current}/{total} ({pct:.0f}%) — {fps:.1f} fps'
+        )
+        self._bidirectional_progress_last_report = current
+        self._bidirectional_progress_last_report_t = now
+
+    def _on_bidirectional_success(self, summary: str):
+        self.gui.text(summary)
+
+    def _on_bidirectional_error(self, message: str):
+        self.gui.text(message)
+
+    def _on_bidirectional_finished(self):
+        self.bidirectional_fill_running = False
+        self.gui.bidirectional_fill_end()
+        self.gui.progressbar_update(0.0)
+        self.res_man.clear_cache()
+        self._reload_iou_plot()
+        self.load_current_image_mask()
+        self.show_current_frame()
 
     def on_pause(self):
         self.propagating = False
@@ -1777,6 +2030,10 @@ class MainController():
                 progress_callback=_mask_metrics_progress,
             )
 
+            interp_n = 0
+            if self.gui.export_dialog.interpolate_mask_gaps_cb.isChecked():
+                df, interp_n = interpolate_mask_metrics_gaps(df)
+
             if df.empty:
                 print("WARNING: No metrics were calculated - DataFrame is empty")
                 self.gui.text('No mask metrics were calculated. Please check if masks exist and contain valid objects.')
@@ -1791,14 +2048,24 @@ class MainController():
             self.gui.process_events()
 
             # Provide feedback about what was calculated
+            interp_suffix = f', {interp_n} interpolated' if interp_n else ''
             if previous_df is not None:
                 new_rows = len(df) - len(previous_df)
                 if new_rows > 0:
-                    self.gui.text(f'Successfully exported mask metrics to {output_filename} (added {new_rows} new rows)')
+                    self.gui.text(
+                        f'Successfully exported mask metrics to {output_filename} '
+                        f'(added {new_rows} new rows{interp_suffix})'
+                    )
                 else:
-                    self.gui.text(f'Successfully exported mask metrics to {output_filename} (no new calculations needed)')
+                    self.gui.text(
+                        f'Successfully exported mask metrics to {output_filename} '
+                        f'(no new calculations needed{interp_suffix})'
+                    )
             else:
-                self.gui.text(f'Successfully exported mask metrics to {output_filename}')
+                self.gui.text(
+                    f'Successfully exported mask metrics to {output_filename}'
+                    f'{f" ({interp_n} interpolated)" if interp_n else ""}'
+                )
             self.gui.progressbar_update(0.0)
 
             # If any pairwise metric checkbox is selected, also export pairwise metrics (.npz)
@@ -1993,4 +2260,80 @@ class PairwiseMetricsWorker(QObject):
             error_msg = f'Error saving pairwise metrics: {str(e)}'
             print(error_msg)
             self.error.emit(error_msg)
+            self.finished.emit()
+
+
+class BidirectionalFillWorker(QObject):
+    """Run bidirectional gap fill in a background thread."""
+
+    finished = Signal()
+    progress = Signal(int, int, str)
+    error = Signal(str)
+    success = Signal(str)
+
+    def __init__(
+        self,
+        workspace,
+        cfg,
+        tracked_object_ids,
+        object_names,
+        num_objects,
+        forward_subdir='forward_masks',
+        backward_subdir='backward_masks',
+        iou_table_name='iou_table.csv',
+        merge_strategy='seed_proximity',
+        overwrite_inferred=True,
+        frame_range=None,
+        output_frames=None,
+        seed_frames=None,
+    ):
+        super().__init__()
+        self.workspace = Path(workspace)
+        self.cfg = cfg
+        self.tracked_object_ids = tracked_object_ids
+        self.object_names = object_names
+        self.num_objects = num_objects
+        self.forward_subdir = forward_subdir
+        self.backward_subdir = backward_subdir
+        self.iou_table_name = iou_table_name
+        self.merge_strategy = merge_strategy
+        self.overwrite_inferred = overwrite_inferred
+        self.frame_range = frame_range
+        self.output_frames = output_frames
+        self.seed_frames = seed_frames
+
+    def run(self):
+        try:
+            def progress_cb(current, total, message):
+                self.progress.emit(current, total, message)
+
+            result = run_bidirectional_gap_fill(
+                self.workspace,
+                self.cfg,
+                tracked_object_ids=self.tracked_object_ids,
+                object_names=self.object_names,
+                num_objects=self.num_objects,
+                forward_subdir=self.forward_subdir,
+                backward_subdir=self.backward_subdir,
+                iou_table_name=self.iou_table_name,
+                merge_strategy=self.merge_strategy,
+                overwrite_inferred=self.overwrite_inferred,
+                frame_range=self.frame_range,
+                output_frames=self.output_frames,
+                seed_frames=self.seed_frames,
+                progress_callback=progress_cb,
+            )
+
+            summary_parts = [
+                f'Bidirectional fill complete. IoU table: {result.iou_table_path}',
+                f'Seeds: {result.seed_frames}',
+                f'Merged frames written: {result.merged_frames_written}',
+            ]
+            for obj_id, mean_iou in sorted(result.mean_iou_per_object.items()):
+                name = self.object_names.get(obj_id, f'object_{obj_id}')
+                summary_parts.append(f'  {name}: mean IoU {mean_iou:.3f}')
+            self.success.emit('\n'.join(summary_parts))
+        except Exception as e:
+            self.error.emit(f'Bidirectional fill failed: {e}')
+        finally:
             self.finished.emit()

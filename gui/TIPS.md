@@ -29,7 +29,10 @@ When you change Show or Track, the app rebuilds **`all_masks`** for the current 
 |----------|----------|----------|
 | **`masks/`** | Single indexed PNG per frame | Inference input; **tracked objects only** |
 | **`all_masks/`** | Multi-channel `{frame}.npz` (one channel per object ID) | Overlay when browsing, mask metrics export, flexible propagation saves |
+| **`seed_frames/`** | Multi-channel `{frame}.npz` (submitted anchors only) | Bidirectional propagation **seed** masks (explicitly submitted frames) |
 | **`soft_masks/{id}/`** | Legacy per-object PNGs | Fallback if `all_masks` is missing |
+| **`forward_masks/`**, **`backward_masks/`** | Indexed PNG per frame | Forward/backward inference outputs from bidirectional fill |
+| **`iou_table.csv`** | Per-object IoU per frame (wide CSV) | IoU plot; below-threshold re-runs |
 
 **Browsing (slider / frame dial):** The overlay is built from **`all_masks` + Show**, not directly from `masks/`. After fast propagation (which only wrote `masks/`), the first visit to a frame may build `all_masks` from disk sources.
 
@@ -68,6 +71,8 @@ The status line shows which mode is active, for example `[fast (masks only)]` or
 - **Propagate forward / backward** - standard propagation with memory carried across frames.
 - **Step forward** - advance one frame without full propagation loop.
 - **Propagate step forward** - propagate one frame and **clear memory** each step (useful when objects cross or occlude; reduces swapping IDs).
+- **Submit seed frame** - copy the **current frame** masks (tracked objects only) to **`seed_frames/`** as anchors for bidirectional propagation. Re-submitting the same frame overwrites that seed. Does not replace normal `masks/` / `all_masks/` storage.
+- **Commit to permanent memory** - pin the current frame in CUTIE memory (separate from submitting a seed).
 
 **Heuristics (rats / occlusion):**
 
@@ -77,11 +82,70 @@ The status line shows which mode is active, for example `[fast (masks only)]` or
 
 ---
 
+### Bidirectional propagation (gap fill)
+
+Use this when you have a few **key annotated frames** and want to fill the video by running inference **forward and backward** from those anchors, then merge results.
+
+**Workflow**
+
+1. Annotate and correct masks on key frames (tracked objects only matter for seeds).
+2. On each anchor frame, click **Submit seed frame**. Seeds are stored in **`seed_frames/`** only — frames with masks elsewhere are **not** used automatically.
+3. In the **IoU plot panel** (bottom of the window), set **From** / **To** for the frame range. Optionally check **Only infer low IoU frames** to re-run only frames where any object IoU is below the **Threshold** (requires a prior bidirectional run with IoU data).
+4. Click **Propagate Bidirectionally from annotations**.
+
+**Requirements**
+
+- At least one submitted seed must fall inside the selected frame range; otherwise propagation is blocked.
+- Stop forward/backward propagation before starting bidirectional fill.
+
+**What it writes**
+
+| Output | Description |
+|--------|-------------|
+| **`forward_masks/`**, **`backward_masks/`** | Separate forward/backward inference masks |
+| **`iou_table.csv`** | Forward vs backward IoU per object per frame |
+| **`masks/`** | Merged masks (if **Overwrite inferred frames in masks/** is checked). **Submitted seed frames are never overwritten.** |
+
+Merge picks forward or backward per frame based on **seed proximity** (nearest submitted seed wins).
+
+**Typical use**
+
+- First pass: set **From/To** covering the whole clip (or a segment), leave **Only infer low IoU frames** unchecked, with seeds on start/middle/end key frames.
+- Refinement: check **Only infer low IoU frames**, adjust **Threshold** if needed, run again to update only weak frames within the same **From/To** range.
+
+---
+
+### IoU plot panel
+
+Located at the **bottom** of the main window (below the timeline).
+
+| Control | Purpose |
+|---------|---------|
+| **IoU plot window (frames)** | Width of the visible frame window in the scatter plot |
+| **From / To** | Frame range for bidirectional inference |
+| **Threshold** | IoU cutoff line on the plot; frames below this (when optional box is checked) are re-inferred |
+| **Only infer low IoU frames** | If checked, re-infer only low-IoU frames in **From/To**; if unchecked, infer all frames in range |
+| **Propagate Bidirectionally from annotations** | Start bidirectional gap fill |
+| **Overwrite inferred frames in masks/** | Write merged results to `masks/` |
+| **Scroll frames** | Pan the plot horizontally |
+
+**Plot markers**
+
+- Colored dots — IoU per object per frame (after a bidirectional run).
+- Black dashed vertical line — current timeline frame.
+- Black dotted horizontal line — IoU threshold.
+- **Green dashed vertical lines** — submitted **seed frames** (visible even before the first IoU run).
+
+**Click a dot** to jump the timeline to that frame and select that object.
+
+---
+
 ### GUI layout
 
 - **Center:** main canvas (current frame + mask overlay).
 - **Right:** object list (Show / Track), memory gauges, **Manual**, console.
-- **Bottom:** timeline slider, frame dial, propagation buttons, visualization mode, export-related toggles.
+- **Bottom:** timeline slider, frame dial, propagation buttons (**Submit seed frame**, forward/backward, commit, …), visualization mode, export-related toggles.
+- **Below timeline:** **IoU plot panel** (bidirectional controls, seed markers, IoU scatter plot).
 - **Export...** dialog: mask metrics, visualization video, binary masks.
 
 ---
@@ -93,6 +157,7 @@ The status line shows which mode is active, for example `[fast (masks only)]` or
 - **Arrow keys** - prev/next frame; **Shift+arrow** - +/-10 frames; **Alt+arrow** - first/last frame.
 - **F / Space** - propagate forward; **B** - propagate backward.
 - **C** - commit current frame to permanent memory.
+- **Submit seed frame** (button) - save current frame as a bidirectional propagation anchor in `seed_frames/`.
 - **Middle-click** on canvas - toggle overlay target objects (popup, layer, RGBA, binary export).
 - **Reset frame** - clear all masks on current frame (disk + display).
 - **Reset object** - clear current object on current frame.
@@ -143,4 +208,4 @@ python interactive_gui.py --workspace PATH --num_objects N [--log-level INFO]
 
 ### About
 
-Customized fork of [Cutie](https://github.com/hkchengrex/Cutie) with multi-object Show/Track control, combined **`all_masks`** storage, mask/pairwise metrics export, and flexible vs fast propagation paths.
+Customized fork of [Cutie](https://github.com/hkchengrex/Cutie) with multi-object Show/Track control, combined **`all_masks`** storage, mask/pairwise metrics export, flexible vs fast propagation paths, **submitted seed frames** for bidirectional gap fill, and an interactive **IoU plot** for quality review and targeted re-runs.

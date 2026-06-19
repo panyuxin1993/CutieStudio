@@ -331,6 +331,88 @@ def calculate_mask_metrics_batch(mask_folder: str, num_objects: int = None, obje
         # No previous data, return just the new data
         return new_df
 
+
+def _lerp_orientation_deg(deg0: float, deg1: float, alpha: float) -> float:
+    """Linear interpolation on the circle (shortest arc), degrees."""
+    r0, r1 = np.radians(deg0), np.radians(deg1)
+    delta = np.arctan2(np.sin(r1 - r0), np.cos(r1 - r0))
+    return float(np.degrees(r0 + alpha * delta))
+
+
+def interpolate_mask_metrics_gaps(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+    """
+    For each object_id, linearly interpolate metric columns for frames strictly between
+    consecutive frames that already have rows. Use when mask/soft-mask files are missing
+    for some ranges (e.g. metrics exist for 0–100 and 200–300; fill 101–199).
+
+    Returns:
+        (expanded_and_sorted_df, num_interpolated_rows_added)
+    """
+    if df is None or df.empty:
+        return df, 0
+
+    numeric_cols = [
+        'area', 'perimeter', 'circularity', 'orientation',
+        'bbox_x', 'bbox_y', 'bbox_width', 'bbox_height',
+        'center_x', 'center_y',
+    ]
+    required = ['frame', 'object_id', 'object_name'] + numeric_cols
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"interpolate_mask_metrics_gaps: missing columns {missing}, skipping")
+        return df, 0
+
+    df = df.sort_values(['object_id', 'frame']).reset_index(drop=True)
+    new_rows: List[dict] = []
+
+    for obj_id, g in df.groupby('object_id', sort=False):
+        g = g.sort_values('frame')
+        frames = g['frame'].tolist()
+        if len(frames) < 2:
+            continue
+        idx_by_frame = g.set_index('frame')
+        for f0, f1 in zip(frames, frames[1:]):
+            if f1 <= f0 + 1:
+                continue
+            row0 = idx_by_frame.loc[f0]
+            row1 = idx_by_frame.loc[f1]
+            if isinstance(row0, pd.DataFrame):
+                row0 = row0.iloc[0]
+            if isinstance(row1, pd.DataFrame):
+                row1 = row1.iloc[0]
+            span = float(f1 - f0)
+            for t in range(f0 + 1, f1):
+                alpha = (t - f0) / span
+                rec = {
+                    'frame': t,
+                    'object_id': obj_id,
+                    'object_name': row0['object_name'],
+                }
+                for col in numeric_cols:
+                    v0, v1 = row0[col], row1[col]
+                    if col == 'orientation':
+                        if pd.isna(v0) or pd.isna(v1):
+                            rec[col] = np.nan
+                        else:
+                            rec[col] = _lerp_orientation_deg(float(v0), float(v1), alpha)
+                    else:
+                        if pd.isna(v0) or pd.isna(v1):
+                            rec[col] = np.nan
+                        else:
+                            rec[col] = (1.0 - alpha) * float(v0) + alpha * float(v1)
+                new_rows.append(rec)
+
+    if not new_rows:
+        return df, 0
+
+    added = pd.DataFrame(new_rows)
+    out = pd.concat([df, added], ignore_index=True)
+    out = out.sort_values(['frame', 'object_id']).reset_index(drop=True)
+    n = len(new_rows)
+    print(f"interpolate_mask_metrics_gaps: added {n} interpolated row(s)")
+    return out, n
+
+
 def calculate_pairwise_metrics(mask1: np.ndarray, mask2: np.ndarray) -> dict:
     """
     Calculate pairwise metrics between two binary masks.

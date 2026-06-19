@@ -16,6 +16,7 @@ import numpy as np
 
 from cutie.utils.palette import davis_palette, davis_palette_np
 from tqdm import tqdm
+from utils.mask_transformer import MaskTransformer
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class ResourceManager:
 
         # create all soft mask sub-directories
         self.num_objects = cfg['num_objects']
+        self._mask_transformer = MaskTransformer(num_objects=self.num_objects)
         for i in range(1, self.num_objects + 1):
             os.makedirs(path.join(self.soft_mask_dir, f'{i}'), exist_ok=True)
 
@@ -786,19 +788,38 @@ class ResourceManager:
 
         mask_path = path.join(self.mask_dir, self.names[ti] + '.png')
         if path.exists(mask_path):
-            mask = Image.open(mask_path)
-            mask = np.array(mask)
-            
+            try:
+                mask, _, _ = self._mask_transformer.read_mask(mask_path, fast_read=True)
+            except Exception as exc:
+                log.warning('MaskTransformer failed for %s: %s; falling back to PIL', mask_path, exc)
+                mask = np.array(Image.open(mask_path))
+                if mask.ndim == 3:
+                    mask = self._rgb_mask_to_indexed(mask)
+
+            if mask.ndim != 2:
+                log.warning('Unexpected mask shape %s for %s; using empty mask', mask.shape, mask_path)
+                mask = np.zeros((self.height, self.width), dtype=np.uint8)
+
             # Filter to only tracked objects if specified
             if tracked_objects is not None:
-                filtered_mask = np.zeros_like(mask)
+                filtered_mask = np.zeros((self.height, self.width), dtype=np.uint8)
                 for obj_id in tracked_objects:
                     filtered_mask[mask == obj_id] = obj_id
                 mask = filtered_mask
-            
+
             return mask
         else:
             return None
+
+    @staticmethod
+    def _rgb_mask_to_indexed(mask_rgb: np.ndarray) -> np.ndarray:
+        """Convert HxWx3 DAVIS RGB mask to HxW object-id mask."""
+        h, w = mask_rgb.shape[:2]
+        indexed = np.zeros((h, w), dtype=np.uint8)
+        for obj_id in range(1, len(davis_palette_np)):
+            color = davis_palette_np[obj_id]
+            indexed[np.all(mask_rgb == color, axis=-1)] = obj_id
+        return indexed
 
     def import_mask(self, file_name: str, size: Optional[Tuple[int, int]] = None):
         # read an mask file and resize it to exactly match the canvas size
