@@ -1046,32 +1046,50 @@ class MainController():
         self._bidirectional_progress_last_report_t = time.time()
         self._bidirectional_progress_t0 = self._bidirectional_progress_last_report_t
 
-        self.bidirectional_worker = BidirectionalFillWorker(
-            workspace=workspace,
-            cfg=self.cfg,
-            tracked_object_ids=set(self.tracked_objects),
-            object_names=object_names,
-            num_objects=self.num_objects,
-            forward_subdir=bi_cfg.get('forward_subdir', 'forward_masks'),
-            backward_subdir=bi_cfg.get('backward_subdir', 'backward_masks'),
-            iou_table_name=bi_cfg.get('iou_table_name', 'iou_table.csv'),
-            merge_strategy=bi_cfg.get('merge_strategy', 'seed_proximity'),
-            overwrite_inferred=settings['overwrite_inferred'],
-            frame_range=frame_range,
-            output_frames=output_frames,
-            seed_frames=seeds_in_range,
-        )
-        self.bidirectional_thread = QThread()
-        self.bidirectional_worker.moveToThread(self.bidirectional_thread)
-        self.bidirectional_thread.started.connect(self.bidirectional_worker.run)
-        self.bidirectional_worker.finished.connect(self.bidirectional_thread.quit)
-        self.bidirectional_worker.finished.connect(self.bidirectional_worker.deleteLater)
-        self.bidirectional_thread.finished.connect(self.bidirectional_thread.deleteLater)
-        self.bidirectional_worker.progress.connect(self._on_bidirectional_progress)
-        self.bidirectional_worker.success.connect(self._on_bidirectional_success)
-        self.bidirectional_worker.error.connect(self._on_bidirectional_error)
-        self.bidirectional_thread.finished.connect(self._on_bidirectional_finished)
-        self.bidirectional_thread.start()
+        temp_processor = InferenceCore(self.cutie, self.cfg)
+
+        def progress_cb(current: int, total: int, message: str):
+            self._on_bidirectional_progress(current, total, message)
+            self.gui.process_events()
+
+        try:
+            result = run_bidirectional_gap_fill(
+                workspace,
+                self.cfg,
+                tracked_object_ids=set(self.tracked_objects),
+                object_names=object_names,
+                num_objects=self.num_objects,
+                forward_subdir=bi_cfg.get('forward_subdir', 'forward_masks'),
+                backward_subdir=bi_cfg.get('backward_subdir', 'backward_masks'),
+                iou_table_name=bi_cfg.get('iou_table_name', 'iou_table.csv'),
+                merge_strategy=bi_cfg.get('merge_strategy', 'seed_proximity'),
+                overwrite_inferred=settings['overwrite_inferred'],
+                frame_range=frame_range,
+                output_frames=output_frames,
+                seed_frames=seeds_in_range,
+                progress_callback=progress_cb,
+                model=self.cutie,
+                processor=temp_processor,
+            )
+
+            summary_parts = [
+                f'Bidirectional fill complete. IoU table: {result.iou_table_path}',
+                f'Seeds: {result.seed_frames}',
+                f'Merged frames written: {result.merged_frames_written}',
+            ]
+            for obj_id, mean_iou in sorted(result.mean_iou_per_object.items()):
+                name = object_names.get(obj_id, f'object_{obj_id}')
+                summary_parts.append(f'  {name}: mean IoU {mean_iou:.3f}')
+            self.gui.text('\n'.join(summary_parts))
+        except Exception as e:
+            self.gui.text(f'Bidirectional fill failed: {e}')
+        finally:
+            del temp_processor
+            self.processor.clear_memory()
+            if 'cuda' in self.device:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            self._on_bidirectional_finished()
 
     def _on_bidirectional_progress(self, current: int, total: int, message: str):
         if total > 0:
@@ -1107,12 +1125,6 @@ class MainController():
         self._bidirectional_progress_last_report = current
         self._bidirectional_progress_last_report_t = now
 
-    def _on_bidirectional_success(self, summary: str):
-        self.gui.text(summary)
-
-    def _on_bidirectional_error(self, message: str):
-        self.gui.text(message)
-
     def _on_bidirectional_finished(self):
         self.bidirectional_fill_running = False
         self.gui.bidirectional_fill_end()
@@ -1121,6 +1133,7 @@ class MainController():
         self._reload_iou_plot()
         self.load_current_image_mask()
         self.show_current_frame()
+        self.gui.process_events()
 
     def on_pause(self):
         self.propagating = False
@@ -2260,80 +2273,4 @@ class PairwiseMetricsWorker(QObject):
             error_msg = f'Error saving pairwise metrics: {str(e)}'
             print(error_msg)
             self.error.emit(error_msg)
-            self.finished.emit()
-
-
-class BidirectionalFillWorker(QObject):
-    """Run bidirectional gap fill in a background thread."""
-
-    finished = Signal()
-    progress = Signal(int, int, str)
-    error = Signal(str)
-    success = Signal(str)
-
-    def __init__(
-        self,
-        workspace,
-        cfg,
-        tracked_object_ids,
-        object_names,
-        num_objects,
-        forward_subdir='forward_masks',
-        backward_subdir='backward_masks',
-        iou_table_name='iou_table.csv',
-        merge_strategy='seed_proximity',
-        overwrite_inferred=True,
-        frame_range=None,
-        output_frames=None,
-        seed_frames=None,
-    ):
-        super().__init__()
-        self.workspace = Path(workspace)
-        self.cfg = cfg
-        self.tracked_object_ids = tracked_object_ids
-        self.object_names = object_names
-        self.num_objects = num_objects
-        self.forward_subdir = forward_subdir
-        self.backward_subdir = backward_subdir
-        self.iou_table_name = iou_table_name
-        self.merge_strategy = merge_strategy
-        self.overwrite_inferred = overwrite_inferred
-        self.frame_range = frame_range
-        self.output_frames = output_frames
-        self.seed_frames = seed_frames
-
-    def run(self):
-        try:
-            def progress_cb(current, total, message):
-                self.progress.emit(current, total, message)
-
-            result = run_bidirectional_gap_fill(
-                self.workspace,
-                self.cfg,
-                tracked_object_ids=self.tracked_object_ids,
-                object_names=self.object_names,
-                num_objects=self.num_objects,
-                forward_subdir=self.forward_subdir,
-                backward_subdir=self.backward_subdir,
-                iou_table_name=self.iou_table_name,
-                merge_strategy=self.merge_strategy,
-                overwrite_inferred=self.overwrite_inferred,
-                frame_range=self.frame_range,
-                output_frames=self.output_frames,
-                seed_frames=self.seed_frames,
-                progress_callback=progress_cb,
-            )
-
-            summary_parts = [
-                f'Bidirectional fill complete. IoU table: {result.iou_table_path}',
-                f'Seeds: {result.seed_frames}',
-                f'Merged frames written: {result.merged_frames_written}',
-            ]
-            for obj_id, mean_iou in sorted(result.mean_iou_per_object.items()):
-                name = self.object_names.get(obj_id, f'object_{obj_id}')
-                summary_parts.append(f'  {name}: mean IoU {mean_iou:.3f}')
-            self.success.emit('\n'.join(summary_parts))
-        except Exception as e:
-            self.error.emit(f'Bidirectional fill failed: {e}')
-        finally:
             self.finished.emit()

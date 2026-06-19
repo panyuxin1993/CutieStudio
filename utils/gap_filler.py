@@ -157,29 +157,55 @@ class CutieGapFiller:
         cfg: DictConfig,
         device: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
+        model: Optional[CUTIE] = None,
+        processor: Optional[InferenceCore] = None,
     ):
         self.logger = logger or log
         self.mask_transformer = mask_transformer
         self.cfg = cfg
 
-        if device is None:
-            if cfg.get('device') == 'cuda' and torch.cuda.is_available():
-                device = 'cuda'
-            elif cfg.get('device') == 'mps' and torch.backends.mps.is_available():
-                device = 'mps'
-            else:
-                device = 'cpu'
-        self.device = torch.device(device)
+        if model is not None:
+            self.model = model
+            self._owns_model = False
+            self.device = next(model.parameters()).device
+        else:
+            if device is None:
+                if cfg.get('device') == 'cuda' and torch.cuda.is_available():
+                    device = 'cuda'
+                elif cfg.get('device') == 'mps' and torch.backends.mps.is_available():
+                    device = 'mps'
+                else:
+                    device = 'cpu'
+            self.device = torch.device(device)
+            self.model = CUTIE(cfg).to(self.device).eval()
+            if cfg.weights is not None:
+                weights = torch.load(cfg.weights, map_location=self.device)
+                self.model.load_weights(weights)
+            self._owns_model = True
 
-        self.model = CUTIE(cfg).to(self.device).eval()
-        if cfg.weights is not None:
-            weights = torch.load(cfg.weights, map_location=self.device)
-            self.model.load_weights(weights)
+        if processor is not None:
+            self.processor = processor
+            self._owns_processor = False
+        else:
+            self.processor = InferenceCore(self.model, cfg=cfg)
+            self._owns_processor = True
 
-        self.processor = InferenceCore(self.model, cfg=cfg)
         self.processor.max_internal_size = cfg.get('max_internal_size', 480)
         self.mem_cleanup_ratio = cfg.get('mem_cleanup_ratio', 0.8)
         torch.set_grad_enabled(False)
+
+    def cleanup(self) -> None:
+        if self.processor is not None:
+            self.processor.clear_memory()
+            if self._owns_processor:
+                del self.processor
+                self.processor = None
+        if self.model is not None and self._owns_model:
+            del self.model
+            self.model = None
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
     def _load_seed_mask(self, source: SeedMaskSource) -> Tuple[np.ndarray, Optional[str]]:
         if isinstance(source, np.ndarray):
@@ -445,6 +471,8 @@ def run_bidirectional_gap_fill(
     step: int = 1,
     output_frames: Optional[Set[int]] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    model: Optional[CUTIE] = None,
+    processor: Optional[InferenceCore] = None,
 ) -> BidirectionalFillResult:
     """Run forward + backward inference from annotated seeds; merge and save IoU table."""
     workspace = Path(workspace)
@@ -505,123 +533,128 @@ def run_bidirectional_gap_fill(
     mask_dir = workspace / 'masks'
 
     mask_transformer = MaskTransformer(num_objects=num_objects)
-    gap_filler = CutieGapFiller(mask_transformer, cfg)
-
-    accumulator = RobustnessAccumulator(
-        object_ids=object_ids,
-        seed_frames=list(seed_sources.keys()),
-        eval_frame_indices=eval_frames,
+    gap_filler = CutieGapFiller(
+        mask_transformer, cfg, model=model, processor=processor,
     )
 
-    total_work = len(eval_frames) * 2
-    frames_done = 0
-
-    if progress_callback:
-        progress_callback(0, total_work, 'Starting forward pass...')
-
-    frames_done += gap_filler.process_direction(
-        workspace,
-        seed_sources,
-        forward_dir,
-        'forward',
-        total_frames,
-        start_frame,
-        end_frame,
-        accumulator,
-        step=step,
-        progress_callback=progress_callback,
-        frames_done=frames_done,
-        total_work=total_work,
-        output_frames=output_frames,
-    )
-
-    if progress_callback:
-        progress_callback(frames_done, total_work, 'Starting backward pass...')
-
-    frames_done += gap_filler.process_direction(
-        workspace,
-        seed_sources,
-        backward_dir,
-        'backward',
-        total_frames,
-        start_frame,
-        end_frame,
-        accumulator,
-        step=step,
-        progress_callback=progress_callback,
-        frames_done=frames_done,
-        total_work=total_work,
-        output_frames=output_frames,
-    )
-
-    accumulator.finalize_seed_frames(seed_object_ids)
-
-    if merge_strategy != 'seed_proximity':
-        raise ValueError(f'Unsupported merge_strategy: {merge_strategy}')
-
-    seed_set = set(seed_sources.keys())
-    merged_written = 0
-    mask_save_format = 'davis'
-
-    if overwrite_inferred:
-        mask_dir.mkdir(parents=True, exist_ok=True)
-        for frame_idx in eval_frames:
-            if frame_idx in seed_set:
-                continue
-
-            forward_mask = accumulator.get_forward_mask(frame_idx)
-            backward_mask = accumulator.get_backward_mask(frame_idx)
-            if forward_mask is None or backward_mask is None:
-                continue
-
-            merged = select_mask_by_seed_proximity(
-                frame_idx,
-                list(seed_sources.keys()),
-                forward_mask,
-                backward_mask,
-            )
-
-            present_ids = sorted(set(np.unique(merged)) - {0})
-            if not present_ids:
-                continue
-
-            mask_transformer.save_masks(
-                merged,
-                mask_dir,
-                frame_idx,
-                format_type=mask_save_format,
-                object_ids=present_ids,
-            )
-            merged_written += 1
-
-    per_object_iou = accumulator.get_per_object_frame_iou()
-    if existing_iou is not None:
-        per_object_iou = merge_iou_values(existing_iou['values'], per_object_iou)
-        frame_indices = sorted(
-            set(existing_iou.get('frame_indices', [])) | set(eval_frames)
+    try:
+        accumulator = RobustnessAccumulator(
+            object_ids=object_ids,
+            seed_frames=list(seed_sources.keys()),
+            eval_frame_indices=eval_frames,
         )
-    else:
-        frame_indices = eval_frames
 
-    iou_df = build_iou_table(
-        object_ids,
-        frame_indices,
-        per_object_iou,
-        object_names=object_names,
-    )
-    iou_path = save_iou_table(iou_df, workspace, csv_name=iou_table_name)
+        total_work = len(eval_frames) * 2
+        frames_done = 0
 
-    if progress_callback:
-        progress_callback(total_work, total_work, 'Done')
+        if progress_callback:
+            progress_callback(0, total_work, 'Starting forward pass...')
 
-    return BidirectionalFillResult(
-        iou_df=iou_df,
-        iou_table_path=iou_path,
-        forward_dir=forward_dir,
-        backward_dir=backward_dir,
-        seed_frames=list(seed_sources.keys()),
-        frame_indices=eval_frames,
-        object_ids=object_ids,
-        mean_iou_per_object=accumulator.summary_mean_iou_per_object(),
-        merged_frames_written=merged_written,
-    )
+        frames_done += gap_filler.process_direction(
+            workspace,
+            seed_sources,
+            forward_dir,
+            'forward',
+            total_frames,
+            start_frame,
+            end_frame,
+            accumulator,
+            step=step,
+            progress_callback=progress_callback,
+            frames_done=frames_done,
+            total_work=total_work,
+            output_frames=output_frames,
+        )
+
+        if progress_callback:
+            progress_callback(frames_done, total_work, 'Starting backward pass...')
+
+        frames_done += gap_filler.process_direction(
+            workspace,
+            seed_sources,
+            backward_dir,
+            'backward',
+            total_frames,
+            start_frame,
+            end_frame,
+            accumulator,
+            step=step,
+            progress_callback=progress_callback,
+            frames_done=frames_done,
+            total_work=total_work,
+            output_frames=output_frames,
+        )
+
+        accumulator.finalize_seed_frames(seed_object_ids)
+
+        if merge_strategy != 'seed_proximity':
+            raise ValueError(f'Unsupported merge_strategy: {merge_strategy}')
+
+        seed_set = set(seed_sources.keys())
+        merged_written = 0
+        mask_save_format = 'davis'
+
+        if overwrite_inferred:
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            for frame_idx in eval_frames:
+                if frame_idx in seed_set:
+                    continue
+
+                forward_mask = accumulator.get_forward_mask(frame_idx)
+                backward_mask = accumulator.get_backward_mask(frame_idx)
+                if forward_mask is None or backward_mask is None:
+                    continue
+
+                merged = select_mask_by_seed_proximity(
+                    frame_idx,
+                    list(seed_sources.keys()),
+                    forward_mask,
+                    backward_mask,
+                )
+
+                present_ids = sorted(set(np.unique(merged)) - {0})
+                if not present_ids:
+                    continue
+
+                mask_transformer.save_masks(
+                    merged,
+                    mask_dir,
+                    frame_idx,
+                    format_type=mask_save_format,
+                    object_ids=present_ids,
+                )
+                merged_written += 1
+
+        per_object_iou = accumulator.get_per_object_frame_iou()
+        if existing_iou is not None:
+            per_object_iou = merge_iou_values(existing_iou['values'], per_object_iou)
+            frame_indices = sorted(
+                set(existing_iou.get('frame_indices', [])) | set(eval_frames)
+            )
+        else:
+            frame_indices = eval_frames
+
+        iou_df = build_iou_table(
+            object_ids,
+            frame_indices,
+            per_object_iou,
+            object_names=object_names,
+        )
+        iou_path = save_iou_table(iou_df, workspace, csv_name=iou_table_name)
+
+        if progress_callback:
+            progress_callback(total_work, total_work, 'Done')
+
+        return BidirectionalFillResult(
+            iou_df=iou_df,
+            iou_table_path=iou_path,
+            forward_dir=forward_dir,
+            backward_dir=backward_dir,
+            seed_frames=list(seed_sources.keys()),
+            frame_indices=eval_frames,
+            object_ids=object_ids,
+            mean_iou_per_object=accumulator.summary_mean_iou_per_object(),
+            merged_frames_written=merged_written,
+        )
+    finally:
+        gap_filler.cleanup()
